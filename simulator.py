@@ -103,8 +103,7 @@ class Simulator:
         
         # move quad out of scene so it doesn't show up in the images
         quad_state = self.get_quad_state()
-        sim.set_agent_state(
-        position=np.array([0.0, 0.0, 0.0]), orientation=np.array([0.0, 0.0, 0.0, 1.0])
+        self.set_agent_state(position=np.array([0.0, 0.0, 0.0]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
         
         # Get RGBA data from the color camera
         rgba = self.sim.get_sensor_observations(0)["color_sensor"]
@@ -136,5 +135,5 @@ if __name__ == "__main__":
     sim = Simulator(
         path_to_scene_file=path_to_scene_file, image_height=256, image_width=256
     )
-    )
+
     rgbd = sim.collect_image_data(True)
