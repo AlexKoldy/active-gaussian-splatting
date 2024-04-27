@@ -133,6 +133,7 @@ class ActiveNeRFMapper:
             .tolist()
         )
 
+        # list of lists - uncertainty of points along each trajectory
         self.trajector_uncertainty_list = [
             [] for _ in range(self.config_file["planning_step"])
         ]
@@ -157,6 +158,7 @@ class ActiveNeRFMapper:
         self.sim_step = 0
         self.viz_save_path = self.save_path + "/viz/"
 
+        # Change ensemble stuff ti single model
         for i in range(self.config_file["n_ensembles"]):
             estimator = OccGridEstimator(
                 roi_aabb=self.aabb,
@@ -197,6 +199,7 @@ class ActiveNeRFMapper:
                 )
             )
 
+        # Replace lpips with dssim for similarity metric
         self.lpips_net = LPIPS(net="vgg").to(self.config_file["cuda"])
         self.lpips_norm_fn = lambda x: x[None, ...].permute(0, 3, 1, 2) * 2 - 1
 
@@ -204,6 +207,7 @@ class ActiveNeRFMapper:
             0.5 * self.config_file["img_w"] / np.tan(self.config_file["hfov"] / 2)
         )
 
+        # Unsure if this cmap stuff is necessary
         cmap = plt.cm.tab20
         cmaplist = [cmap(i) for i in range(cmap.N)]
         cmap1 = plt.cm.tab20b
@@ -255,6 +259,7 @@ class ActiveNeRFMapper:
             pose = g_pose.copy()
             pose[3:] = R.from_euler("zyx", angles, degrees=True).as_quat()
 
+            # Maybe we keep this noise addition??
             pose[:3] = pose[:3] + np.random.uniform([-0.2, -0.2, -0.2], [0.2, 0.2, 0.2])
             sampled_poses_quat.append(pose)
 
@@ -269,27 +274,29 @@ class ActiveNeRFMapper:
             sampled_sem_images,
         ) = self.sim.sample_images_from_poses(sampled_poses_quat)
 
-        for i, d_img in enumerate(sampled_depth_images):
-            d_points = d_img[int(d_img.shape[0] / 2)]
-            R_m = sampled_poses_mat[i][:3, :3]
-            euler = R.from_matrix(R_m).as_euler("yzx")
-            d_angles = (self.align_angles + euler[0]) % (2 * np.pi)
-            w_loc = sampled_poses_mat[i][:3, 3]
-            grid_loc = np.array(
-                (w_loc - self.aabb.cpu().numpy()[:3])
-                // self.config_file["main_grid_size"],
-                dtype=int,
-            )
-            self.cost_map, visiting_map = update_cost_map(
-                cost_map=self.cost_map,
-                depth=d_points,
-                angle=d_angles,
-                g_loc=grid_loc,
-                w_loc=w_loc,
-                aabb=self.aabb.cpu().numpy(),
-                resolution=self.config_file["main_grid_size"],
-            )
-            self.visiting_map += visiting_map
+        # Updating cost map using observed depth values
+        # We can take this out
+        # for i, d_img in enumerate(sampled_depth_images):
+        #     d_points = d_img[int(d_img.shape[0] / 2)]
+        #     R_m = sampled_poses_mat[i][:3, :3]
+        #     euler = R.from_matrix(R_m).as_euler("yzx")
+        #     d_angles = (self.align_angles + euler[0]) % (2 * np.pi)
+        #     w_loc = sampled_poses_mat[i][:3, 3]
+        #     grid_loc = np.array(
+        #         (w_loc - self.aabb.cpu().numpy()[:3])
+        #         // self.config_file["main_grid_size"],
+        #         dtype=int,
+        #     )
+        #     self.cost_map, visiting_map = update_cost_map(
+        #         cost_map=self.cost_map,
+        #         depth=d_points,
+        #         angle=d_angles,
+        #         g_loc=grid_loc,
+        #         w_loc=w_loc,
+        #         aabb=self.aabb.cpu().numpy(),
+        #         resolution=self.config_file["main_grid_size"],
+        #     )
+        #     self.visiting_map += visiting_map
 
         sampled_images = sampled_images[:, :, :, :3]
 
@@ -371,11 +378,11 @@ class ActiveNeRFMapper:
         num_test_images = self.test_dataset.size
         test_idx = np.arange(num_test_images)
 
-        self.sem_ce_ls = []
+        # self.sem_ce_ls = []
 
-        def occ_eval_fn(x):
-            density = radiance_field.query_density(x)
-            return density * self.config_file["render_step_size"]
+        # def occ_eval_fn(x):
+        #     density = radiance_field.query_density(x)
+        #     return density * self.config_file["render_step_size"]
 
         losses = [[], [], []]
 
@@ -491,17 +498,17 @@ class ActiveNeRFMapper:
                 if n_rendering_samples == 0:
                     continue
 
-                if self.config_file["target_sample_batch_size"] > 0:
-                    # dynamic batch size for rays to keep sample batch size constant.
-                    num_rays = len(pixels)
-                    num_rays = int(
-                        num_rays
-                        * (
-                            self.config_file["target_sample_batch_size"]
-                            / float(n_rendering_samples)
-                        )
-                    )
-                    self.train_dataset.update_num_rays(min(2000, num_rays))
+                # if self.config_file["target_sample_batch_size"] > 0:
+                #     # dynamic batch size for rays to keep sample batch size constant.
+                #     num_rays = len(pixels)
+                #     num_rays = int(
+                #         num_rays
+                #         * (
+                #             self.config_file["target_sample_batch_size"]
+                #             / float(n_rendering_samples)
+                #         )
+                #     )
+                #     self.train_dataset.update_num_rays(min(2000, num_rays))
 
                 # compute loss
                 loss_rgb = F.smooth_l1_loss(rgb, pixels)
