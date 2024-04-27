@@ -100,6 +100,11 @@ class Simulator:
         Returns:
             (np.ndarray): RGB, depth values as numpy array of shape (height, width, 4)
         """
+        
+        # move quad out of scene so it doesn't show up in the images
+        quad_state = self.get_quad_state()
+        self.set_agent_state(position=np.array([0.0, 0.0, 0.0]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
+        
         # Get RGBA data from the color camera
         rgba = self.sim.get_sensor_observations(0)["color_sensor"]
 
@@ -112,6 +117,9 @@ class Simulator:
             plt.figure()
             plt.imshow(rgb_img)
             plt.show()
+
+        # move quad back to original position
+        self.set_quad_state(quad_state)
 
         # Concatenate the data and return it. The alpha value is not returned
         return np.concatenate((rgba[:, :, :-1], np.expand_dims(depth, axis=2)), axis=2)
@@ -127,7 +135,5 @@ if __name__ == "__main__":
     sim = Simulator(
         path_to_scene_file=path_to_scene_file, image_height=256, image_width=256
     )
-    sim.set_agent_state(
-        position=np.array([0.0, 0.0, 0.0]), orientation=np.array([0.0, 0.0, 0.0, 1.0])
-    )
+
     rgbd = sim.collect_image_data(True)
