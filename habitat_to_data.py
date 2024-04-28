@@ -36,13 +36,13 @@ class Dataset(torch.utils.data.Dataset):
         training: bool,
         save_fp: str,
         # num_rays: int = None,
-        batch_over_images: bool = True,
+        # batch_over_images: bool = True,
         # num_models: int = 1,
         device: str = "cpu",
     ):
         super().__init__()
         # self.num_rays = num_rays
-        self.batch_over_images = batch_over_images
+        # self.batch_over_images = batch_over_images
         # self.num_models = num_models
         # self.bootstrap_indices = [
         #     np.array([]).astype(int) for _ in range(self.num_models - 1)
