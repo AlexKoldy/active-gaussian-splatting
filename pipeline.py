@@ -88,7 +88,7 @@ def parse_args():
     return parser.parse_args()
 
 
-class ActiveNeRFMapper:
+class ActiveGaussSplatMapper:
     def __init__(self, args) -> None:
         print("Parameters Loading")
         # initialize radiance field, estimator, optimzer, and dataset
@@ -110,28 +110,28 @@ class ActiveNeRFMapper:
         )
 
         # model parameters
-        self.main_grid_resolution = (
-            (
-                (self.aabb.cpu().numpy()[3:] - self.aabb.cpu().numpy()[:3])
-                / self.config_file["main_grid_size"]
-            )
-            .astype(int)
-            .tolist()
-        )
+        # self.main_grid_resolution = (
+        #     (
+        #         (self.aabb.cpu().numpy()[3:] - self.aabb.cpu().numpy()[:3])
+        #         / self.config_file["main_grid_size"]
+        #     )
+        #     .astype(int)
+        #     .tolist()
+        # )
 
-        self.cost_map = np.full(
-            (self.main_grid_resolution[0], self.main_grid_resolution[2]), 0.5
-        )
-        self.visiting_map = np.zeros(self.cost_map.shape)
+        # self.cost_map = np.full(
+        #     (self.main_grid_resolution[0], self.main_grid_resolution[2]), 0.5
+        # )
+        # self.visiting_map = np.zeros(self.cost_map.shape)
 
-        self.minor_grid_resolution = (
-            (
-                (self.aabb.cpu().numpy()[3:] - self.aabb.cpu().numpy()[:3])
-                / self.config_file["minor_grid_size"]
-            )
-            .astype(int)
-            .tolist()
-        )
+        # self.minor_grid_resolution = (
+        #     (
+        #         (self.aabb.cpu().numpy()[3:] - self.aabb.cpu().numpy()[:3])
+        #         / self.config_file["minor_grid_size"]
+        #     )
+        #     .astype(int)
+        #     .tolist()
+        # )
 
         # list of lists - uncertainty of points along each trajectory
         self.trajector_uncertainty_list = [
@@ -143,60 +143,58 @@ class ActiveNeRFMapper:
         if self.policy_type == "random":
             self.config_file["num_traj"] = 1
 
-        self.estimators = []
-        self.radiance_fields = []
-        self.optimizers = []
-        self.grad_scalers = []
-        self.schedulers = []
+        # self.estimators = []
+        # self.radiance_fields = []
+        # self.optimizers = []
+        # self.grad_scalers = []
+        # self.schedulers = []
         self.binary_grid = None
         self.train_dataset = None
         self.test_dataset = None
         self.errors_hist = []
 
-        self.sem_ce_ls = []
+        # self.sem_ce_ls = []
 
         self.sim_step = 0
         self.viz_save_path = self.save_path + "/viz/"
 
-        # Change ensemble stuff ti single model
-        for i in range(self.config_file["n_ensembles"]):
-            estimator = OccGridEstimator(
-                roi_aabb=self.aabb,
-                resolution=self.main_grid_resolution,
-                levels=self.config_file["main_grid_nlvl"],
-            ).to(self.config_file["cuda"])
+        # Change ensemble stuff to single model
+        # for i in range(self.config_file["n_ensembles"]):
+        estimator = OccGridEstimator(
+            roi_aabb=self.aabb,
+            resolution=self.main_grid_resolution,
+            levels=self.config_file["main_grid_nlvl"],
+        ).to(self.config_file["cuda"])
 
-            radiance_field = NGPRadianceField(
-                aabb=estimator.aabbs[-1],
-                neurons=self.config_file["main_neurons"],
-                layers=self.config_file["main_layer"],
-                num_semantic_classes=args.sem_num,
-            ).to(self.config_file["cuda"])
-            optimizer = torch.optim.Adam(
-                radiance_field.parameters(),
-                lr=1e-3,
-                eps=1e-15,
-                weight_decay=self.config_file["weight_decay"],
-            )
+        radiance_field = NGPRadianceField(
+            aabb=estimator.aabbs[-1],
+            neurons=self.config_file["main_neurons"],
+            layers=self.config_file["main_layer"],
+            num_semantic_classes=args.sem_num,
+        ).to(self.config_file["cuda"])
+        optimizer = torch.optim.Adam(
+            radiance_field.parameters(),
+            lr=1e-3,
+            eps=1e-15,
+            weight_decay=self.config_file["weight_decay"],
+        )
 
-            self.estimators.append(estimator)
-            self.grad_scalers.append(torch.cuda.amp.GradScaler(2**10))
-            self.radiance_fields.append(radiance_field)
-            self.optimizers.append(optimizer)
-            self.schedulers.append(
-                torch.optim.lr_scheduler.ChainedScheduler(
-                    [
-                        torch.optim.lr_scheduler.CyclicLR(
-                            optimizer,
-                            base_lr=1e-4,
-                            max_lr=1e-3,
-                            step_size_up=int(self.config_file["training_steps"] / 4),
-                            mode="exp_range",
-                            gamma=1.0,  # 0.9999,
-                            cycle_momentum=False,
-                        )
-                    ]
-                )
+        self.estimator = estimator
+        self.grad_scaler = (torch.cuda.amp.GradScaler(2**10))
+        self.radiance_field = radiance_field
+        self.optimizer = optimizer
+        self.scheduler = torch.optim.lr_scheduler.ChainedScheduler(
+                [
+                    torch.optim.lr_scheduler.CyclicLR(
+                        optimizer,
+                        base_lr=1e-4,
+                        max_lr=1e-3,
+                        step_size_up=int(self.config_file["training_steps"] / 4),
+                        mode="exp_range",
+                        gamma=1.0,  # 0.9999,
+                        cycle_momentum=False,
+                    )
+                ]
             )
 
         # Replace lpips with dssim for similarity metric
@@ -313,7 +311,7 @@ class ActiveNeRFMapper:
         self.train_dataset.update_data(
             sampled_images,
             sampled_depth_images,
-            sampled_sem_images,
+            # sampled_sem_images,
             sampled_poses_mat,
         )
 
@@ -337,7 +335,7 @@ class ActiveNeRFMapper:
         (
             test_sampled_images,
             test_sampled_depth_images,
-            test_sampled_sem_images,
+            # test_sampled_sem_images,
         ) = self.sim.sample_images_from_poses(test_samples)
 
         test_sampled_images = test_sampled_images[:, :, :, :3]
@@ -345,14 +343,14 @@ class ActiveNeRFMapper:
         self.test_dataset = Dataset(
             training=False,
             save_fp=self.save_path + "/test/",
-            num_models=self.config_file["n_ensembles"],
+            # num_models=self.config_file["n_ensembles"],
             device=self.config_file["cuda"],
         )
 
         self.test_dataset.update_data(
             test_sampled_images,
             test_sampled_depth_images,
-            test_sampled_sem_images,
+            # test_sampled_sem_images,
             np.array(test_sampled_poses_mat),
         )
 
