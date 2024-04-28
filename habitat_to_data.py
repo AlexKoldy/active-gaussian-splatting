@@ -12,11 +12,11 @@ import torch.nn.functional as F
 import tqdm
 
 sys.path.append("perception/models")
-from datasets.utils import Rays
-from utils import (
-    render_image_with_occgrid_test,
-    render_probablistic_image_with_occgrid_test,
-)
+# from datasets.utils import Rays
+# from utils import (
+#     render_image_with_occgrid_test,
+#     render_probablistic_image_with_occgrid_test,
+# )
 
 from scipy.spatial.transform import Rotation as R
 
@@ -35,18 +35,18 @@ class Dataset(torch.utils.data.Dataset):
         self,
         training: bool,
         save_fp: str,
-        num_rays: int = None,
+        # num_rays: int = None,
         batch_over_images: bool = True,
-        num_models: int = 1,
+        # num_models: int = 1,
         device: str = "cpu",
     ):
         super().__init__()
-        self.num_rays = num_rays
+        # self.num_rays = num_rays
         self.batch_over_images = batch_over_images
-        self.num_models = num_models
-        self.bootstrap_indices = [
-            np.array([]).astype(int) for _ in range(self.num_models - 1)
-        ]
+        # self.num_models = num_models
+        # self.bootstrap_indices = [
+        #     np.array([]).astype(int) for _ in range(self.num_models - 1)
+        # ]
         self.images = None
         self.depths = None
         # self.semantics = None
@@ -54,7 +54,7 @@ class Dataset(torch.utils.data.Dataset):
         self.training = training
         self.device = device
         self.save_fp = save_fp
-        self.boot_scale = 0.7
+        # self.boot_scale = 0.7
 
         self.saved_batch = 0
         self.downsampled_end = None
@@ -86,7 +86,7 @@ class Dataset(torch.utils.data.Dataset):
     #         )
     #         self.bootstrap_indices[i] = np.concatenate([arr, ids], axis=0)
 
-    def update_data(self, images, depths, semantics, camtoworlds):
+    def update_data(self, images, depths, camtoworlds):
         if self.images is None:
             self.camtoworlds = (
                 torch.from_numpy(camtoworlds).to(torch.float32).to(self.device)
@@ -100,15 +100,15 @@ class Dataset(torch.utils.data.Dataset):
             # )
 
             # bootstrap indices
-            for i, arr in enumerate(self.bootstrap_indices):
-                ids = np.random.choice(
-                    len(images),
-                    size=(int(len(images) * self.boot_scale),),
-                    replace=True,
-                )
-                self.bootstrap_indices[i] = np.concatenate(
-                    [arr, self.size + ids], axis=0
-                )
+            # for i, arr in enumerate(self.bootstrap_indices):
+            #     ids = np.random.choice(
+            #         len(images),
+            #         size=(int(len(images) * self.boot_scale),),
+            #         replace=True,
+            #     )
+            #     self.bootstrap_indices[i] = np.concatenate(
+            #         [arr, self.size + ids], axis=0
+            #     )
 
             self.height, self.width = self.images.shape[1:3]
             hfov = np.pi / 2
@@ -122,14 +122,14 @@ class Dataset(torch.utils.data.Dataset):
             )
             self.K = torch.tensor(self.K).to(torch.float32).to(self.device)
         else:
-            for i, arr in enumerate(self.bootstrap_indices):
-                ids = np.random.choice(
-                    len(images),
-                    size=(int(len(images) * self.boot_scale),),
-                    replace=True,
-                )
-                ids = ids + self.size
-                self.bootstrap_indices[i] = np.concatenate([arr, ids], axis=0)
+            # for i, arr in enumerate(self.bootstrap_indices):
+            #     ids = np.random.choice(
+            #         len(images),
+            #         size=(int(len(images) * self.boot_scale),),
+            #         replace=True,
+            #     )
+            #     ids = ids + self.size
+            #     self.bootstrap_indices[i] = np.concatenate([arr, ids], axis=0)
 
             images = torch.from_numpy(images).to(torch.uint8).to(self.device)
             camtoworlds = (
@@ -166,25 +166,27 @@ class Dataset(torch.utils.data.Dataset):
             self.save_fp + "/data" + str(self.saved_batch) + ".npz",
             images=self.images.cpu().numpy(),
             depths=self.depths.cpu().numpy(),
-            semantics=self.semantics.cpu().numpy(),
+            # semantics=self.semantics.cpu().numpy(),
             camtoworlds=self.camtoworlds.cpu().numpy(),
             K=self.K.cpu().numpy(),
-            bootstrap_indices=np.array(self.bootstrap_indices),
+            # bootstrap_indices=np.array(self.bootstrap_indices),
         )
 
     # def update_num_rays(self, num_rays):
     #     self.num_rays = num_rays
 
-    def bootstrap(self, model_idx):
-        if model_idx == 0:
-            return np.arange(self.size)
-        else:
-            return self.bootstrap_indices[model_idx - 1]
+    # def bootstrap(self, model_idx):
+    #     if model_idx == 0:
+    #         return np.arange(self.size)
+    #     else:
+    #         return self.bootstrap_indices[model_idx - 1]
 
     def preprocess(self, data):
         """Process the fetched / cached data with randomness."""
-        pixels, rays = data["rgb"], data["rays"]
-        dep, sem = data["dep"], data["sem"]
+        pixels = data["rgb"]
+        # rays = data["rays"]
+        dep = data["dep"]
+        # sem = data["sem"]
 
         if self.training:
             # random during training to aid learning correct radiance field
@@ -197,14 +199,14 @@ class Dataset(torch.utils.data.Dataset):
             "pixels": pixels,  # [n_rays, 3] or [h, w, 3]
             "dep": dep,  # [n_rays,] or [h, w]
             # "sem": sem,  # [n_rays,] or [h, w]
-            "rays": rays,  # [n_rays,] or [h, w]
+            # "rays": rays,  # [n_rays,] or [h, w]
             "color_bkgd": color_bkgd,  # [3,]
             **{k: v for k, v in data.items() if k not in ["rgb", "rays", "dep", "sem"]},
         }
 
     def fetch_data(self, index):
-        """Images to Rays"""
-        num_rays = self.num_rays
+        # """Images to Rays"""
+        # num_rays = self.num_rays
 
         if self.training:
             image_id = torch.randint(
@@ -214,8 +216,15 @@ class Dataset(torch.utils.data.Dataset):
                 device=self.device,
             )
 
-            x = torch.randint(0, self.width, size=(num_rays,), device=self.device)
-            y = torch.randint(0, self.height, size=(num_rays,), device=self.device)
+            # x = torch.randint(0, self.width, size=(num_rays,), device=self.device)
+            # y = torch.randint(0, self.height, size=(num_rays,), device=self.device)
+            x, y = torch.meshgrid(
+                torch.arange(self.width, device=self.device),
+                torch.arange(self.height, device=self.device),
+                indexing="xy",
+            )
+            x = x.flatten()
+            y = y.flatten()
         else:
             image_id = torch.tensor([index], device=self.device)
             x, y = torch.meshgrid(
@@ -252,8 +261,10 @@ class Dataset(torch.utils.data.Dataset):
         if self.training:
             # origins = torch.reshape(origins, (num_rays, 3))
             # viewdirs = torch.reshape(viewdirs, (num_rays, 3))
-            rgb = torch.reshape(rgb, (num_rays, 3))
-            dep = torch.reshape(dep, (num_rays,))
+            # rgb = torch.reshape(rgb, (num_rays, 3))
+            # dep = torch.reshape(dep, (num_rays,))
+            rgb = torch.reshape(rgb, (self.height, self.width, 3))
+            dep = torch.reshape(dep, (self.height, self.width))
             # sem = torch.reshape(sem, (num_rays,))
         else:
             # origins = torch.reshape(origins, (self.height, self.width, 3))
@@ -410,140 +421,140 @@ class Dataset(torch.utils.data.Dataset):
         else:
             return images, depths, accs
 
-    def render_probablistic_image_from_pose(
-        radiance_field,
-        estimator,
-        poses,
-        width,
-        height,
-        focal,
-        near_plane,
-        render_step_size,
-        scale,
-        cone_angle,
-        alpha_thre,
-        downsample,
-        device="cuda:0",
-    ):
-        images = np.zeros((poses.shape[0], int(height * scale), int(width * scale), 3))
-        depths = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
-        images_var = np.zeros(
-            (poses.shape[0], int(height * scale), int(width * scale), 3)
-        )
-        depths_var = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
-        accs = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
-        sems = np.zeros(
-            (
-                poses.shape[0],
-                int(height * scale),
-                int(width * scale),
-                radiance_field.num_semantic_classes,
-            )
-        )
+    # def render_probablistic_image_from_pose(
+    #     radiance_field,
+    #     estimator,
+    #     poses,
+    #     width,
+    #     height,
+    #     focal,
+    #     near_plane,
+    #     render_step_size,
+    #     scale,
+    #     cone_angle,
+    #     alpha_thre,
+    #     downsample,
+    #     device="cuda:0",
+    # ):
+    #     images = np.zeros((poses.shape[0], int(height * scale), int(width * scale), 3))
+    #     depths = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
+    #     images_var = np.zeros(
+    #         (poses.shape[0], int(height * scale), int(width * scale), 3)
+    #     )
+    #     depths_var = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
+    #     accs = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
+    #     sems = np.zeros(
+    #         (
+    #             poses.shape[0],
+    #             int(height * scale),
+    #             int(width * scale),
+    #             radiance_field.num_semantic_classes,
+    #         )
+    #     )
 
-        for i, p in enumerate(poses):
-            v = p[:3]
-            so = R.from_quat(p[3:])
+    #     for i, p in enumerate(poses):
+    #         v = p[:3]
+    #         so = R.from_quat(p[3:])
 
-            pose = np.eye(4)
-            pose[:3, :3] = so.as_matrix()
-            pose[:3, 3] = v
-            pose = torch.from_numpy(pose).unsqueeze(0).float().to(device)
+    #         pose = np.eye(4)
+    #         pose[:3, :3] = so.as_matrix()
+    #         pose[:3, 3] = v
+    #         pose = torch.from_numpy(pose).unsqueeze(0).float().to(device)
 
-            K = np.array(
-                [
-                    [focal, 0.0000, width / 2],
-                    [0.0000, focal, height / 2],
-                    [0.0000, 0.0000, 1.0000],
-                ]
-            )
+    #         K = np.array(
+    #             [
+    #                 [focal, 0.0000, width / 2],
+    #                 [0.0000, focal, height / 2],
+    #                 [0.0000, 0.0000, 1.0000],
+    #             ]
+    #         )
 
-            rs = Dataset.generate_image_rays(pose, width, height, K, device)
-            idx = np.round(
-                np.linspace(
-                    0, len(rs.origins) - 1, int(height * scale) * int(width * scale)
-                )
-            ).astype(int)
-            rays = Rays(origins=rs.origins[idx], viewdirs=rs.viewdirs[idx])
+    #         rs = Dataset.generate_image_rays(pose, width, height, K, device)
+    #         idx = np.round(
+    #             np.linspace(
+    #                 0, len(rs.origins) - 1, int(height * scale) * int(width * scale)
+    #             )
+    #         ).astype(int)
+    #         rays = Rays(origins=rs.origins[idx], viewdirs=rs.viewdirs[idx])
 
-            render_bkgd = torch.zeros(3, device=device)
+    #         render_bkgd = torch.zeros(3, device=device)
 
-            if radiance_field.num_semantic_classes > 0:
-                (
-                    rgb,
-                    rgb_var,
-                    acc,
-                    depth,
-                    depth_var,
-                    sem,
-                    _,
-                ) = render_probablistic_image_with_occgrid_test(
-                    1024,
-                    # scene
-                    radiance_field,
-                    estimator,
-                    rays,
-                    # rendering options
-                    near_plane=near_plane,
-                    render_step_size=render_step_size,
-                    render_bkgd=render_bkgd,
-                    cone_angle=cone_angle,
-                    alpha_thre=alpha_thre,
-                )
-                sems[i] = (
-                    sem.cpu()
-                    .numpy()
-                    .reshape(
-                        (
-                            int(height * scale),
-                            int(width * scale),
-                            radiance_field.num_semantic_classes,
-                        )
-                    )
-                )
-            else:
-                (
-                    rgb,
-                    rgb_var,
-                    acc,
-                    depth,
-                    depth_var,
-                    _,
-                ) = render_probablistic_image_with_occgrid_test(
-                    1024,
-                    # scene
-                    radiance_field,
-                    estimator,
-                    rays,
-                    # rendering options
-                    near_plane=near_plane,
-                    render_step_size=render_step_size,
-                    render_bkgd=render_bkgd,
-                    cone_angle=cone_angle,
-                    alpha_thre=alpha_thre,
-                )
+    #         if radiance_field.num_semantic_classes > 0:
+    #             (
+    #                 rgb,
+    #                 rgb_var,
+    #                 acc,
+    #                 depth,
+    #                 depth_var,
+    #                 sem,
+    #                 _,
+    #             ) = render_probablistic_image_with_occgrid_test(
+    #                 1024,
+    #                 # scene
+    #                 radiance_field,
+    #                 estimator,
+    #                 rays,
+    #                 # rendering options
+    #                 near_plane=near_plane,
+    #                 render_step_size=render_step_size,
+    #                 render_bkgd=render_bkgd,
+    #                 cone_angle=cone_angle,
+    #                 alpha_thre=alpha_thre,
+    #             )
+    #             sems[i] = (
+    #                 sem.cpu()
+    #                 .numpy()
+    #                 .reshape(
+    #                     (
+    #                         int(height * scale),
+    #                         int(width * scale),
+    #                         radiance_field.num_semantic_classes,
+    #                     )
+    #                 )
+    #             )
+    #         else:
+    #             (
+    #                 rgb,
+    #                 rgb_var,
+    #                 acc,
+    #                 depth,
+    #                 depth_var,
+    #                 _,
+    #             ) = render_probablistic_image_with_occgrid_test(
+    #                 1024,
+    #                 # scene
+    #                 radiance_field,
+    #                 estimator,
+    #                 rays,
+    #                 # rendering options
+    #                 near_plane=near_plane,
+    #                 render_step_size=render_step_size,
+    #                 render_bkgd=render_bkgd,
+    #                 cone_angle=cone_angle,
+    #                 alpha_thre=alpha_thre,
+    #             )
 
-            images[i] = (
-                rgb.cpu().numpy().reshape((int(height * scale), int(width * scale), 3))
-            )
-            depths[i] = (
-                depth.cpu().numpy().reshape((int(height * scale), int(width * scale)))
-            )
-            images_var[i] = (
-                rgb_var.cpu()
-                .numpy()
-                .reshape((int(height * scale), int(width * scale), 3))
-            )
-            depths_var[i] = (
-                depth_var.cpu()
-                .numpy()
-                .reshape((int(height * scale), int(width * scale)))
-            )
-            accs[i] = (
-                acc.cpu().numpy().reshape((int(height * scale), int(width * scale)))
-            )
+    #         images[i] = (
+    #             rgb.cpu().numpy().reshape((int(height * scale), int(width * scale), 3))
+    #         )
+    #         depths[i] = (
+    #             depth.cpu().numpy().reshape((int(height * scale), int(width * scale)))
+    #         )
+    #         images_var[i] = (
+    #             rgb_var.cpu()
+    #             .numpy()
+    #             .reshape((int(height * scale), int(width * scale), 3))
+    #         )
+    #         depths_var[i] = (
+    #             depth_var.cpu()
+    #             .numpy()
+    #             .reshape((int(height * scale), int(width * scale)))
+    #         )
+    #         accs[i] = (
+    #             acc.cpu().numpy().reshape((int(height * scale), int(width * scale)))
+    #         )
 
-        if radiance_field.num_semantic_classes > 0:
-            return images, images_var, depths, depths_var, accs, sems
-        else:
-            return images, images_var, depths, depths_var, accs
+    #     if radiance_field.num_semantic_classes > 0:
+    #         return images, images_var, depths, depths_var, accs, sems
+    #     else:
+    #         return images, images_var, depths, depths_var, accs
