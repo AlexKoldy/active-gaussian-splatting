@@ -7,6 +7,19 @@ import torch.nn.functional as F
 from einops import rearrange
 
 # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+def get_camera(poses, intrinsic_):
+    src_cameras = []
+    intrinsic = np.eye(4,4)
+    intrinsic[:3,:3] = intrinsic_
+    for pose in poses:
+        camera = torch.from_numpy(np.concatenate(
+        ([256, 256], intrinsic.flatten(), pose.flatten())
+        ).astype(np.float32))
+        
+        src_cameras.append(camera)
+    src_cameras = torch.stack(src_cameras, axis=0)
+    return src_cameras
+
 def read_camera(folder):
     """
     read camera from json file
