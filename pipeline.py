@@ -305,8 +305,8 @@ class ActiveNeRFMapper:
         self.train_dataset = Dataset(
             training=True,
             save_fp=self.save_path + "/train/",
-            num_rays=self.config_file["init_batch_size"],
-            num_models=self.config_file["n_ensembles"],
+            # num_rays=self.config_file["init_batch_size"],
+            # num_models=self.config_file["n_ensembles"],
             device=self.config_file["cuda"],
         )
 
