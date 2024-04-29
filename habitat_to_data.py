@@ -5,11 +5,11 @@ Adapted from 2022 Ruilong Li, UC Berkeley.
 import os
 import sys
 
-import imageio
+# import imageio
 import numpy as np
 import torch
 import torch.nn.functional as F
-import tqdm
+# import tqdm
 
 sys.path.append("perception/models")
 # from datasets.utils import Rays
@@ -20,12 +20,12 @@ sys.path.append("perception/models")
 
 from scipy.spatial.transform import Rotation as R
 
-from matplotlib import pyplot as plt
+# from matplotlib import pyplot as plt
 
-import cv2
+# import cv2
 
-from skimage import io
-from skimage import color
+# from skimage import io
+# from skimage import color
 
 from gaussian_splatting.utils.camera_utils import to_viewpoint_camera
 

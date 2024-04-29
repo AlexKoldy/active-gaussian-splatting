@@ -131,9 +131,9 @@ def get_radius(cov2d):
     return 3.0 * torch.sqrt(torch.max(lambda1, lambda2)).ceil()
 
 @torch.no_grad()
-def get_rect(pix_coord, radii, width, height):
-    rect_min = (pix_coord - radii[:,None])
-    rect_max = (pix_coord + radii[:,None])
+def get_rect(pix_coord, radii, width, height, inmask):
+    rect_min = (pix_coord - radii[inmask][:,None])
+    rect_max = (pix_coord + radii[inmask][:,None])
     rect_min[..., 0] = rect_min[..., 0].clip(0, width - 1.0)
     rect_min[..., 1] = rect_min[..., 1].clip(0, height - 1.0)
     rect_max[..., 0] = rect_max[..., 0].clip(0, width - 1.0)
@@ -170,9 +170,12 @@ class GaussRenderer(nn.Module):
         color = (color + 0.5).clip(min=0.0)
         return color
     
-    def render(self, camera, means2D, cov2d, color, opacity, depths):
+    def render(self, camera, means2D, cov2d, color, opacity, depths, mask):
         radii = get_radius(cov2d)
-        rect = get_rect(means2D, radii, width=camera.image_width, height=camera.image_height)
+        cov2d = cov2d[mask]
+        opacity = opacity[mask]
+        color = color[mask]
+        rect = get_rect(means2D, radii, width=camera.image_width, height=camera.image_height, inmask=mask)
         
         self.render_color = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda')
         self.render_depth = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
@@ -229,6 +232,7 @@ class GaussRenderer(nn.Module):
         scales = pc.get_scaling
         # rotations = pc.get_rotation
         shs = pc.get_features
+        in_mask = torch.ones(len(means3D))
         
         if USE_PROFILE:
             prof = profiler.record_function
@@ -273,6 +277,7 @@ class GaussRenderer(nn.Module):
                 color=color,
                 opacity=opacity, 
                 depths=depths,
+                mask=in_mask
             )
 
         return rets

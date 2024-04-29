@@ -3,11 +3,12 @@ import numpy as np
 import gaussian_splatting.utils as utils
 from gaussian_splatting.trainer import Trainer
 import gaussian_splatting.utils.loss_utils as loss_utils
-from gaussian_splatting.utils.data_utils import read_all
+from gaussian_splatting.utils.data_utils import get_camera, read_all
 from gaussian_splatting.utils.camera_utils import to_viewpoint_camera
 from gaussian_splatting.utils.point_utils import get_point_clouds
 from gaussian_splatting.gauss_model import GaussModel
 from gaussian_splatting.gauss_render import GaussRenderer
+from habitat_to_data import Dataset
 
 import contextlib
 
@@ -77,13 +78,35 @@ class GSSTrainer(Trainer):
 
 if __name__ == "__main__":
     device = 'cuda'
-    folder = './B075X65R3X'
-    data = read_all(folder, resize_factor=0.5)
-    data = {k: v.to(device) for k, v in data.items()}
-    data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
+    # folder = './B075X65R3X'
+    # data = read_all(folder, resize_factor=0.5)
+    # data = {k: v.to(device) for k, v in data.items()}
+    
+    trainset = Dataset(
+            training=True,
+            save_fp="./train/",
+            device="cuda",
+        )
+    with np.load('train/data0.npz') as data:
+        trainset.update_data(data['images'], data['depths'], data['camtoworlds'])
+    data = {}
+    data['rgb'] = trainset.images / 255.0
+    data['depth'] = trainset.depths
+    data['depth_range'] = torch.Tensor([[0,6]]*trainset.size).to(device)
+    data['alpha'] = torch.ones(trainset.depths.shape).to(device)
+
+    data['camera'] = get_camera(trainset.camtoworlds.cpu(), trainset.K.cpu()).to(device)
+    print(data['camera'].shape)
+    points = get_point_clouds(data['camera'], trainset.depths, 
+                              torch.ones(trainset.depths.shape).to(device), 
+                              trainset.images / 255.0)
+
+    # data = read_all(folder, resize_factor=0.5)
+    # data = {k: v.to(device) for k, v in data.items()}
+    # data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
 
 
-    points = get_point_clouds(data['camera'], data['depth'], data['alpha'], data['rgb'])
+    # points = get_point_clouds(data['camera'], data['depth'], data['alpha'], data['rgb'])
     raw_points = points.random_sample(2**12)
     # raw_points.write_ply(open('points.ply', 'wb'))
 
@@ -97,7 +120,7 @@ if __name__ == "__main__":
     trainer = GSSTrainer(model=gaussModel, 
         data=data,
         train_batch_size=1, 
-        train_num_steps=100,
+        train_num_steps=5000,
         i_image =100,
         train_lr=1e-3, 
         amp=False,
