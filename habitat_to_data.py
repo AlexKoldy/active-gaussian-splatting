@@ -27,6 +27,8 @@ import cv2
 from skimage import io
 from skimage import color
 
+from gaussian_splatting.utils.camera_utils import to_viewpoint_camera
+
 
 class Dataset(torch.utils.data.Dataset):
     """Gathered Dataset"""
@@ -238,20 +240,20 @@ class Dataset(torch.utils.data.Dataset):
         rgb = self.images[image_id, y, x] / 255.0  # (num_rays, 3)
         dep = self.depths[image_id, y, x]  # (num_rays,)
         # sem = self.semantics[image_id, y, x]  # (num_rays,)
-        c2w = self.camtoworlds[image_id]  # (num_rays, 3, 4)
+        # c2w = self.camtoworlds[image_id]  # (num_rays, 3, 4)
 
-        # -1.0 for OPENGL_CAMERA
-        camera_dirs = F.pad(
-            torch.stack(
-                [
-                    (x - self.K[0, 2] + 0.5) / self.K[0, 0],
-                    (y - self.K[1, 2] + 0.5) / self.K[1, 1] * -1.0,
-                ],
-                dim=1,
-            ),
-            (0, 1),
-            value=-1.0,
-        )  # [num_rays, 3]
+        # # -1.0 for OPENGL_CAMERA
+        # camera_dirs = F.pad(
+        #     torch.stack(
+        #         [
+        #             (x - self.K[0, 2] + 0.5) / self.K[0, 0],
+        #             (y - self.K[1, 2] + 0.5) / self.K[1, 1] * -1.0,
+        #         ],
+        #         dim=1,
+        #     ),
+        #     (0, 1),
+        #     value=-1.0,
+        # )  # [num_rays, 3]
 
         # [num_rays, 3]
         # directions = (camera_dirs[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
@@ -310,6 +312,51 @@ class Dataset(torch.utils.data.Dataset):
     #     viewdirs = directions / torch.linalg.norm(directions, dim=-1, keepdims=True)
 
     #     return Rays(origins=origins, viewdirs=viewdirs)
+
+    def render_image_from_pose(
+            model,
+            poses,
+            width,
+            height,
+            focal,
+            device="cuda:0"
+    ):
+        images = np.zeros((poses.shape[0], int(height), int(width ), 3))
+        depths = np.zeros((poses.shape[0], int(height), int(width)))
+        K = np.array(
+            [
+                [focal, 0.0000, width / 2],
+                [0.0000, focal, height / 2],
+                [0.0000, 0.0000, 1.0000],
+            ]
+        )
+        for i,pose in enumerate(poses):
+            v = pose[:3]
+            so = R.from_quat(pose[3:])
+
+            pose = np.eye(4)
+            pose[:3, :3] = so.as_matrix()
+            pose[:3, 3] = v
+            pose = torch.from_numpy(pose).unsqueeze(0).float().to(device)
+            
+            camera = get_camera(pose, K)
+            # Use pose and K to get "camera"
+            camera = to_viewpoint_camera(camera)
+            out = GaussRenderer(pc=model, camera=camera)
+            rgb_pd = out['render'].detach().cpu().numpy()
+            depth = out['depth'].detach().cpu().numpy()
+            images[i] = rgb_pd
+            depths[i] = depth
+        
+        return images, depths
+
+
+# data = read_all(folder, resize_factor=0.5) #this needs to be adapted to use Dataset
+
+# camera = self.data['camera'][ind]
+# camera = to_viewpoint_camera(camera)
+# out = self.gaussRender(pc=self.model, camera=camera)
+# rgb_pd = out['render'].detach().cpu().numpy()
 
     # Render Image
     def render_image_from_pose(
