@@ -28,7 +28,8 @@ from scipy.spatial.transform import Rotation as R
 # from skimage import color
 
 from gaussian_splatting.utils.camera_utils import to_viewpoint_camera
-
+from gaussian_splatting.utils.data_utils import get_camera
+from gaussian_splatting.gauss_render import GaussRenderer
 
 class Dataset(torch.utils.data.Dataset):
     """Gathered Dataset"""
@@ -323,6 +324,8 @@ class Dataset(torch.utils.data.Dataset):
     ):
         images = np.zeros((poses.shape[0], int(height), int(width ), 3))
         depths = np.zeros((poses.shape[0], int(height), int(width)))
+        Ts = np.zeros((poses.shape[0], 4, 4))
+
         K = np.array(
             [
                 [focal, 0.0000, width / 2],
@@ -338,16 +341,15 @@ class Dataset(torch.utils.data.Dataset):
             pose[:3, :3] = so.as_matrix()
             pose[:3, 3] = v
             pose = torch.from_numpy(pose).unsqueeze(0).float().to(device)
-            
-            camera = get_camera(pose, K)
-            # Use pose and K to get "camera"
-            camera = to_viewpoint_camera(camera)
-            out = GaussRenderer(pc=model, camera=camera)
-            rgb_pd = out['render'].detach().cpu().numpy()
-            depth = out['depth'].detach().cpu().numpy()
-            images[i] = rgb_pd
-            depths[i] = depth
-        
+            Ts[i] = pose
+
+        camera = get_camera(Ts, K)
+        camera = to_viewpoint_camera(camera)
+        out = GaussRenderer(pc=model, camera=camera)
+        images = out['render'].detach().cpu().numpy()
+        depths = out['depth'].detach().cpu().numpy()
+        # images[i] = rgb_pd
+        # depths[i] = depth
         return images, depths
 
 
@@ -359,114 +361,114 @@ class Dataset(torch.utils.data.Dataset):
 # rgb_pd = out['render'].detach().cpu().numpy()
 
     # Render Image
-    def render_image_from_pose(
-        radiance_field,
-        estimator,
-        poses,
-        width,
-        height,
-        focal,
-        near_plane,
-        render_step_size,
-        scale,
-        cone_angle,
-        alpha_thre,
-        downsample,
-        device="cuda:0",
-    ):
-        images = np.zeros((poses.shape[0], int(height * scale), int(width * scale), 3))
-        depths = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
-        accs = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
-        # sems = np.zeros(
-        #     (
-        #         poses.shape[0],
-        #         int(height * scale),
-        #         int(width * scale),
-        #         radiance_field.num_semantic_classes,
-        #     )
-        # )
+    # def render_image_from_pose(
+    #     radiance_field,
+    #     estimator,
+    #     poses,
+    #     width,
+    #     height,
+    #     focal,
+    #     near_plane,
+    #     render_step_size,
+    #     scale,
+    #     cone_angle,
+    #     alpha_thre,
+    #     downsample,
+    #     device="cuda:0",
+    # ):
+    #     images = np.zeros((poses.shape[0], int(height * scale), int(width * scale), 3))
+    #     depths = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
+    #     accs = np.zeros((poses.shape[0], int(height * scale), int(width * scale)))
+    #     # sems = np.zeros(
+    #     #     (
+    #     #         poses.shape[0],
+    #     #         int(height * scale),
+    #     #         int(width * scale),
+    #     #         radiance_field.num_semantic_classes,
+    #     #     )
+    #     # )
 
-        for i, p in enumerate(poses):
-            v = p[:3]
-            so = R.from_quat(p[3:])
+    #     for i, p in enumerate(poses):
+    #         v = p[:3]
+    #         so = R.from_quat(p[3:])
 
-            pose = np.eye(4)
-            pose[:3, :3] = so.as_matrix()
-            pose[:3, 3] = v
-            pose = torch.from_numpy(pose).unsqueeze(0).float().to(device)
+    #         pose = np.eye(4)
+    #         pose[:3, :3] = so.as_matrix()
+    #         pose[:3, 3] = v
+    #         pose = torch.from_numpy(pose).unsqueeze(0).float().to(device)
 
-            K = np.array(
-                [
-                    [focal, 0.0000, width / 2],
-                    [0.0000, focal, height / 2],
-                    [0.0000, 0.0000, 1.0000],
-                ]
-            )
+    #         K = np.array(
+    #             [
+    #                 [focal, 0.0000, width / 2],
+    #                 [0.0000, focal, height / 2],
+    #                 [0.0000, 0.0000, 1.0000],
+    #             ]
+    #         )
 
-            rs = Dataset.generate_image_rays(pose, width, height, K, device)
-            idx = np.round(
-                np.linspace(
-                    0, len(rs.origins) - 1, int(height * scale) * int(width * scale)
-                )
-            ).astype(int)
-            rays = Rays(origins=rs.origins[idx], viewdirs=rs.viewdirs[idx])
+    #         rs = Dataset.generate_image_rays(pose, width, height, K, device)
+    #         idx = np.round(
+    #             np.linspace(
+    #                 0, len(rs.origins) - 1, int(height * scale) * int(width * scale)
+    #             )
+    #         ).astype(int)
+    #         rays = Rays(origins=rs.origins[idx], viewdirs=rs.viewdirs[idx])
 
-            render_bkgd = torch.zeros(3, device=device)
+    #         render_bkgd = torch.zeros(3, device=device)
 
-            if radiance_field.num_semantic_classes > 0:
-                rgb, acc, depth, sem, _ = render_image_with_occgrid_test(
-                    1024,
-                    # scene
-                    radiance_field,
-                    estimator,
-                    rays,
-                    # rendering options
-                    near_plane=near_plane,
-                    render_step_size=render_step_size,
-                    render_bkgd=render_bkgd,
-                    cone_angle=cone_angle,
-                    alpha_thre=alpha_thre,
-                )
-                # sems[i] = (
-                #     sem.cpu()
-                #     .numpy()
-                #     .reshape(
-                #         (
-                #             int(height * scale),
-                #             int(width * scale),
-                #             radiance_field.num_semantic_classes,
-                #         )
-                #     )
-                # )
-            else:
-                rgb, acc, depth, _ = render_image_with_occgrid_test(
-                    1024,
-                    # scene
-                    radiance_field,
-                    estimator,
-                    rays,
-                    # rendering options
-                    near_plane=near_plane,
-                    render_step_size=render_step_size,
-                    render_bkgd=render_bkgd,
-                    cone_angle=cone_angle,
-                    alpha_thre=alpha_thre,
-                )
+    #         if radiance_field.num_semantic_classes > 0:
+    #             rgb, acc, depth, sem, _ = render_image_with_occgrid_test(
+    #                 1024,
+    #                 # scene
+    #                 radiance_field,
+    #                 estimator,
+    #                 rays,
+    #                 # rendering options
+    #                 near_plane=near_plane,
+    #                 render_step_size=render_step_size,
+    #                 render_bkgd=render_bkgd,
+    #                 cone_angle=cone_angle,
+    #                 alpha_thre=alpha_thre,
+    #             )
+    #             # sems[i] = (
+    #             #     sem.cpu()
+    #             #     .numpy()
+    #             #     .reshape(
+    #             #         (
+    #             #             int(height * scale),
+    #             #             int(width * scale),
+    #             #             radiance_field.num_semantic_classes,
+    #             #         )
+    #             #     )
+    #             # )
+    #         else:
+    #             rgb, acc, depth, _ = render_image_with_occgrid_test(
+    #                 1024,
+    #                 # scene
+    #                 radiance_field,
+    #                 estimator,
+    #                 rays,
+    #                 # rendering options
+    #                 near_plane=near_plane,
+    #                 render_step_size=render_step_size,
+    #                 render_bkgd=render_bkgd,
+    #                 cone_angle=cone_angle,
+    #                 alpha_thre=alpha_thre,
+    #             )
 
-            images[i] = (
-                rgb.cpu().numpy().reshape((int(height * scale), int(width * scale), 3))
-            )
-            depths[i] = (
-                depth.cpu().numpy().reshape((int(height * scale), int(width * scale)))
-            )
-            accs[i] = (
-                acc.cpu().numpy().reshape((int(height * scale), int(width * scale)))
-            )
+    #         images[i] = (
+    #             rgb.cpu().numpy().reshape((int(height * scale), int(width * scale), 3))
+    #         )
+    #         depths[i] = (
+    #             depth.cpu().numpy().reshape((int(height * scale), int(width * scale)))
+    #         )
+    #         accs[i] = (
+    #             acc.cpu().numpy().reshape((int(height * scale), int(width * scale)))
+    #         )
 
-        if radiance_field.num_semantic_classes > 0:
-            return images, depths, accs#, sems
-        else:
-            return images, depths, accs
+    #     if radiance_field.num_semantic_classes > 0:
+    #         return images, depths, accs#, sems
+    #     else:
+    #         return images, depths, accs
 
     # def render_probablistic_image_from_pose(
     #     radiance_field,
