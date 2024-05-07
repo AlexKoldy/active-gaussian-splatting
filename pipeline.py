@@ -31,20 +31,31 @@ import torch.nn.functional as F
 from lpips import LPIPS
 import cv2
 
-sys.path.append("perception/nerfacc")
-from nerfacc.estimators.occ_grid import OccGridEstimator
+# sys.path.append("perception/nerfacc")
+# from nerfacc.estimators.occ_grid import OccGridEstimator
 
 # nerfacc
-sys.path.append("perception/models")
-from datasets.utils import Rays
-from utils import (
-    render_image_with_occgrid,
-    render_image_with_occgrid_test,
-    render_image_with_occgrid_with_depth_guide,
-    render_probablistic_image_with_occgrid_test,
-)
-from radiance_fields.ngp import NGPRadianceField
+# sys.path.append("perception/models")
+# from datasets.utils import Rays
+# from utils import (
+#     render_image_with_occgrid,
+#     render_image_with_occgrid_test,
+#     render_image_with_occgrid_with_depth_guide,
+#     render_probablistic_image_with_occgrid_test,
+# )
+# from radiance_fields.ngp import NGPRadianceField
 
+from gaussian_splatting.trainer import Trainer
+import gaussian_splatting.utils.loss_utils as loss_utils
+from gaussian_splatting.utils.data_utils import get_camera, read_all
+from gaussian_splatting.utils.camera_utils import to_viewpoint_camera
+from gaussian_splatting.utils.point_utils import get_point_clouds
+from gaussian_splatting.gauss_model import GaussModel
+from gaussian_splatting.gauss_render import GaussRenderer
+from habitat_to_data import Dataset
+import contextlib
+from torch.profiler import profile, ProfilerActivity
+import gaussian_splatting.utils as utils
 
 # rotorpy
 sys.path.append("planning/rotorpy")
@@ -86,6 +97,67 @@ def parse_args():
         help="scene_dataset_self.config_file",
     )
     return parser.parse_args()
+
+class GSSTrainer(Trainer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.data = kwargs.get('data')
+        self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
+        self.lambda_dssim = 0.2
+        self.lambda_depth = 0.0
+        self.USE_GPU_PYTORCH = True
+        self.USE_PROFILE = False
+
+    def on_train_step(self):
+        ind = np.random.choice(len(self.data['camera']))
+        camera = self.data['camera'][ind]
+        rgb = self.data['rgb'][ind]
+        depth = self.data['depth'][ind]
+        mask = (self.data['alpha'][ind] > 0.5)
+        if self.USE_GPU_PYTORCH:
+            camera = to_viewpoint_camera(camera)
+
+        if self.USE_PROFILE:
+            prof = profile(activities=[ProfilerActivity.CUDA], with_stack=True)
+        else:
+            prof = contextlib.nullcontext()
+
+        with prof:
+            out = self.gaussRender(pc=self.model, camera=camera)
+
+        if self.USE_PROFILE:
+            print(prof.key_averages(group_by_stack_n=True).table(sort_by='self_cuda_time_total', row_limit=20))
+
+
+        l1_loss = loss_utils.l1_loss(out['render'], rgb)
+        depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
+        ssim_loss = 1.0-loss_utils.ssim(out['render'], rgb)
+
+        total_loss = (1-self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
+        #psnr = utils.img2psnr(out['render'], rgb)
+        log_dict = {'total': total_loss,'l1':l1_loss, 'ssim': ssim_loss, 'depth': depth_loss}#, 'psnr': psnr}
+
+        return total_loss, log_dict
+
+    def on_evaluate_step(self, **kwargs):
+        import matplotlib.pyplot as plt
+        ind = np.random.choice(len(self.data['camera']))
+        camera = self.data['camera'][ind]
+        if self.USE_GPU_PYTORCH:
+            camera = to_viewpoint_camera(camera)
+
+        rgb = self.data['rgb'][ind].detach().cpu().numpy()
+        out = self.gaussRender(pc=self.model, camera=camera)
+        rgb_pd = out['render'].detach().cpu().numpy()
+        depth_pd = out['depth'].detach().cpu().numpy()[..., 0]
+        depth = self.data['depth'][ind].detach().cpu().numpy()
+        depth = np.concatenate([depth, depth_pd], axis=1)
+        depth = (1 - depth / depth.max())
+        depth = plt.get_cmap('jet')(depth)[..., :3]
+        image = np.concatenate([rgb, rgb_pd], axis=1)
+        image = np.concatenate([image, depth], axis=0)
+        utils.imwrite(str(self.results_folder / f'image-{self.step}.png'), image)
+
 
 
 class ActiveGaussSplatMapper:
@@ -160,33 +232,36 @@ class ActiveGaussSplatMapper:
 
         # Change ensemble stuff to single model
         # for i in range(self.config_file["n_ensembles"]):
-        estimator = OccGridEstimator(
-            roi_aabb=self.aabb,
-            resolution=self.main_grid_resolution,
-            levels=self.config_file["main_grid_nlvl"],
-        ).to(self.config_file["cuda"])
+        # estimator = OccGridEstimator(
+        #     roi_aabb=self.aabb,
+        #     resolution=self.main_grid_resolution,
+        #     levels=self.config_file["main_grid_nlvl"],
+        # ).to(self.config_file["cuda"])
 
-        radiance_field = NGPRadianceField(
-            aabb=estimator.aabbs[-1],
-            neurons=self.config_file["main_neurons"],
-            layers=self.config_file["main_layer"],
-            num_semantic_classes=args.sem_num,
-        ).to(self.config_file["cuda"])
-        optimizer = torch.optim.Adam(
-            radiance_field.parameters(),
+        # radiance_field = NGPRadianceField(
+        #     aabb=estimator.aabbs[-1],
+        #     neurons=self.config_file["main_neurons"],
+        #     layers=self.config_file["main_layer"],
+        #     num_semantic_classes=args.sem_num,
+        # ).to(self.config_file["cuda"])
+
+        self.gaussModel = GaussModel(debug=False)
+
+        self.optimizer = torch.optim.Adam(
+            self.gaussModel.parameters(),
             lr=1e-3,
             eps=1e-15,
             weight_decay=self.config_file["weight_decay"],
         )
 
-        self.estimator = estimator
-        self.grad_scaler = (torch.cuda.amp.GradScaler(2**10))
-        self.radiance_field = radiance_field
-        self.optimizer = optimizer
+        # self.estimator = estimator
+        # self.grad_scaler = (torch.cuda.amp.GradScaler(2**10))
+        # self.radiance_field = radiance_field
+        # self.optimizer = optimizer
         self.scheduler = torch.optim.lr_scheduler.ChainedScheduler(
                 [
                     torch.optim.lr_scheduler.CyclicLR(
-                        optimizer,
+                        self.optimizer,
                         base_lr=1e-4,
                         max_lr=1e-3,
                         step_size_up=int(self.config_file["training_steps"] / 4),
@@ -356,10 +431,11 @@ class ActiveGaussSplatMapper:
 
         print("Initialization Finished")
 
-    def nerf_training(
+    
+    def gauss_training(
         self, steps, final_train=False, initial_train=False, planning_step=-1
     ):
-        print("Nerf Training Started")
+        print("3D Gaussian Model Training Started")
 
         if final_train:
             self.schedulers = []
@@ -384,238 +460,273 @@ class ActiveGaussSplatMapper:
 
         losses = [[], [], []]
 
-        for step in tqdm.tqdm(range(steps)):
-            # train and record the models in the ensemble
-            ground_truth_imgs = []
-            rendered_imgs = [[] for _ in range(num_test_images)]
+        # for step in tqdm.tqdm(range(steps)):
+        # train and record the models in the ensemble
+        ground_truth_imgs = []
+        # rendered_imgs = [[] for _ in range(num_test_images)]
+        rendered_imgs = []
 
-            psnrs_lst = [[] for _ in range(num_test_images)]
-            lpips_lst = [[] for _ in range(num_test_images)]
+        psnrs_lst = [[] for _ in range(num_test_images)]
+        lpips_lst = [[] for _ in range(num_test_images)]
 
-            ground_truth_depth = []
-            depth_imgs = [[] for _ in range(num_test_images)]
-            mse_dep_lst = [[] for _ in range(num_test_images)]
+        ground_truth_depth = []
+        # depth_imgs = [[] for _ in range(num_test_images)]
+        depth_imgs = []
+        # mse_dep_lst = [[] for _ in range(num_test_images)]
+        mse_dep_list = []
 
-            ground_truth_sem = []
-            sem_imgs = []
+        ground_truth_sem = []
+        sem_imgs = []
 
-            # training each model
-            for model_idx, (
-                radiance_field,
-                estimator,
-                optimizer,
-                scheduler,
-                grad_scaler,
-            ) in enumerate(
-                zip(
-                    self.radiance_fields,
-                    self.estimators,
-                    self.optimizers,
-                    self.schedulers,
-                    self.grad_scalers,
-                )
-            ):
-                curr_device = (
-                    self.config_file["cuda"]
-                    if model_idx == 0
-                    else self.config_file["cuda"]
-                )
-                radiance_field.train()
-                estimator.train()
+        # training each model
+        # for model_idx, (
+        #     radiance_field,
+        #     estimator,
+        #     optimizer,
+        #     scheduler,
+        #     grad_scaler,
+        # ) in enumerate(
+        #     zip(
+        #         self.radiance_fields,
+        #         self.estimators,
+        #         self.optimizers,
+        #         self.schedulers,
+        #         self.grad_scalers,
+        #     )
+        # ):
+        device = (
+            self.config_file["cuda"]
+            # if model_idx == 0
+            # else self.config_file["cuda"]
+        )
+        device = 'cuda'
+        # radiance_field.train()
+        # estimator.train()
 
-                c = np.random.random_sample()
+        trainset = self.train_dataset
+        data = {}
+        data['rgb'] = trainset.images / 255.0 # Check this line???
+        data['depth'] = trainset.depths
+        data['depth_range'] = torch.Tensor([[0,6]]*trainset.size).to(device)
+        data['alpha'] = torch.ones(trainset.depths.shape).to(device)
 
-                if c < 0.5 and not final_train and not initial_train:
-                    # train with most recent batch of data
-                    curr_idx = self.train_dataset.bootstrap(model_idx)
-                    curr_idx = curr_idx[
-                        curr_idx
-                        >= self.train_dataset.size - self.config_file["sample_disc"]
-                    ]
-                    i = np.random.choice(curr_idx, 1).item()
-                else:
-                    curr_idx = self.train_dataset.bootstrap(model_idx)
-                    i = np.random.choice(curr_idx, 1).item()
+        data['camera'] = get_camera(trainset.camtoworlds.cpu(), trainset.K.cpu()).to(device)
+        print(data['camera'].shape)
+        points = get_point_clouds(data['camera'], trainset.depths, 
+                                torch.ones(trainset.depths.shape).to(device), 
+                                trainset.images / 255.0)
+        raw_points = points.random_sample(2**12)
+        self.gaussModel.create_from_pcd(pcd=raw_points)
+        render_kwargs = {'white_bkgd': True}
+        trainer = GSSTrainer(model=self.gaussModel, 
+            data=data,
+            train_batch_size=1, 
+            train_num_steps=steps,
+            i_image =100,
+            train_lr=1e-3, 
+            amp=False,
+            fp16=False,
+            results_folder='result/test',
+            render_kwargs=render_kwargs,
+        )
+        trainer.on_evaluate_step()
+        trainer.train()
 
-                data = self.train_dataset[i]
-                render_bkgd = data["color_bkgd"].to(curr_device)
-                ry = data["rays"]
-                rays = Rays(
-                    origins=ry.origins.to(curr_device),
-                    viewdirs=ry.viewdirs.to(curr_device),
-                )
-                pixels = data["pixels"].to(curr_device)
-                dep = data["dep"].to(curr_device)
-                sem = data["sem"].to(curr_device)
+            ############# OLD NERF TRAINING BELOW ##############
 
-                # update occupancy grid
-                if planning_step == -1:
-                    estimator.update_every_n_steps(
-                        step=step,
-                        occ_eval_fn=occ_eval_fn,
-                        occ_thre=1e-3,
-                    )
-                elif planning_step == -10:
-                    estimator.update_every_n_steps(
-                        step=step,
-                        occ_eval_fn=occ_eval_fn,
-                        occ_thre=1e-2,
-                    )
-                elif planning_step < 5:
-                    estimator.update_every_n_steps(
-                        step=step,
-                        occ_eval_fn=occ_eval_fn,
-                        occ_thre=1e-3,
-                    )
-                else:
-                    estimator.update_every_n_steps(
-                        step=step,
-                        occ_eval_fn=occ_eval_fn,
-                        occ_thre=3e-3,
-                    )
+            # c = np.random.random_sample()
 
-                (
-                    rgb,
-                    acc,
-                    depth,
-                    semantic,
-                    n_rendering_samples,
-                ) = render_image_with_occgrid_with_depth_guide(
-                    radiance_field,
-                    estimator,
-                    rays,
-                    # rendering options
-                    near_plane=self.config_file["near_plane"],
-                    render_step_size=self.config_file["render_step_size"],
-                    render_bkgd=render_bkgd,
-                    cone_angle=self.config_file["cone_angle"],
-                    alpha_thre=self.config_file["alpha_thre"],
-                    depth=dep,
-                )
+            # if c < 0.5 and not final_train and not initial_train:
+            #     # train with most recent batch of data
+            #     curr_idx = self.train_dataset.bootstrap(model_idx)
+            #     curr_idx = curr_idx[
+            #         curr_idx
+            #         >= self.train_dataset.size - self.config_file["sample_disc"]
+            #     ]
+            #     i = np.random.choice(curr_idx, 1).item()
+            # else:
+            #     curr_idx = self.train_dataset.bootstrap(model_idx)
+            #     i = np.random.choice(curr_idx, 1).item()
 
-                if n_rendering_samples == 0:
-                    continue
+            # data = self.train_dataset[i]
+            # render_bkgd = data["color_bkgd"].to(curr_device)
+            # ry = data["rays"]
+            # rays = Rays(
+            #     origins=ry.origins.to(curr_device),
+            #     viewdirs=ry.viewdirs.to(curr_device),
+            # )
+            # pixels = data["pixels"].to(curr_device)
+            # dep = data["dep"].to(curr_device)
+            # sem = data["sem"].to(curr_device)
 
-                # if self.config_file["target_sample_batch_size"] > 0:
-                #     # dynamic batch size for rays to keep sample batch size constant.
-                #     num_rays = len(pixels)
-                #     num_rays = int(
-                #         num_rays
-                #         * (
-                #             self.config_file["target_sample_batch_size"]
-                #             / float(n_rendering_samples)
-                #         )
-                #     )
-                #     self.train_dataset.update_num_rays(min(2000, num_rays))
+            # # # update occupancy grid
+            # # if planning_step == -1:
+            # #     estimator.update_every_n_steps(
+            # #         step=step,
+            # #         occ_eval_fn=occ_eval_fn,
+            # #         occ_thre=1e-3,
+            # #     )
+            # # elif planning_step == -10:
+            # #     estimator.update_every_n_steps(
+            # #         step=step,
+            # #         occ_eval_fn=occ_eval_fn,
+            # #         occ_thre=1e-2,
+            # #     )
+            # # elif planning_step < 5:
+            # #     estimator.update_every_n_steps(
+            # #         step=step,
+            # #         occ_eval_fn=occ_eval_fn,
+            # #         occ_thre=1e-3,
+            # #     )
+            # # else:
+            # #     estimator.update_every_n_steps(
+            # #         step=step,
+            # #         occ_eval_fn=occ_eval_fn,
+            # #         occ_thre=3e-3,
+            # #     )
 
-                # compute loss
-                loss_rgb = F.smooth_l1_loss(rgb, pixels)
-                loss_dep = F.smooth_l1_loss(depth, dep.unsqueeze(1))
-                loss_sem = F.cross_entropy(semantic, sem)
+            # (
+            #     rgb,
+            #     acc,
+            #     depth,
+            #     semantic,
+            #     n_rendering_samples,
+            # ) = render_image_with_occgrid_with_depth_guide(
+            #     radiance_field,
+            #     estimator,
+            #     rays,
+            #     # rendering options
+            #     near_plane=self.config_file["near_plane"],
+            #     render_step_size=self.config_file["render_step_size"],
+            #     render_bkgd=render_bkgd,
+            #     cone_angle=self.config_file["cone_angle"],
+            #     alpha_thre=self.config_file["alpha_thre"],
+            #     depth=dep,
+            # )
 
-                loss = loss_rgb * 10 + loss_dep / 5 + loss_sem / 2
+            # if n_rendering_samples == 0:
+            #     continue
 
-                losses[0].append(loss_rgb.detach().cpu().item())
-                losses[1].append(loss_dep.detach().cpu().item() / 50)
-                losses[2].append(loss_sem.detach().cpu().item() / 2)
+            # # if self.config_file["target_sample_batch_size"] > 0:
+            # #     # dynamic batch size for rays to keep sample batch size constant.
+            # #     num_rays = len(pixels)
+            # #     num_rays = int(
+            # #         num_rays
+            # #         * (
+            # #             self.config_file["target_sample_batch_size"]
+            # #             / float(n_rendering_samples)
+            # #         )
+            # #     )
+            # #     self.train_dataset.update_num_rays(min(2000, num_rays))
 
-                optimizer.zero_grad()
-                loss.backward()
+            # # compute loss
+            # loss_rgb = F.smooth_l1_loss(rgb, pixels)
+            # loss_dep = F.smooth_l1_loss(depth, dep.unsqueeze(1))
+            # loss_sem = F.cross_entropy(semantic, sem)
 
-                flag = False
-                for name, param in radiance_field.named_parameters():
-                    if torch.sum(torch.isnan(param.grad)) > 0:
-                        flag = True
-                        break
+            # loss = loss_rgb * 10 + loss_dep / 5 + loss_sem / 2
 
-                if flag:
-                    optimizer.zero_grad()
-                    print("step jumped")
-                    continue
-                else:
-                    optimizer.step()
-                    scheduler.step()
+            # losses[0].append(loss_rgb.detach().cpu().item())
+            # losses[1].append(loss_dep.detach().cpu().item() / 50)
+            # losses[2].append(loss_sem.detach().cpu().item() / 2)
 
-                if model_idx == 0 and step % 500:
-                    self.learning_rate_lst.append(scheduler._last_lr)
+            # optimizer.zero_grad()
+            # loss.backward()
 
-                # Evaluation
-                if (
-                    step == steps + 1
-                    and (
-                        (planning_step == 0)
-                        or ((planning_step + 1) % 2 == 0)
-                        or final_train
-                    )
-                    and model_idx == 0
-                ):
-                    radiance_field.eval()
-                    estimator.eval()
+            # flag = False
+            # for name, param in radiance_field.named_parameters():
+            #     if torch.sum(torch.isnan(param.grad)) > 0:
+            #         flag = True
+            #         break
 
-                    psnrs = []
-                    lpips = []
-                    with torch.no_grad():
-                        for i in tqdm.tqdm(range(num_test_images)):
-                            data = self.test_dataset[test_idx[i]]
-                            render_bkgd = data["color_bkgd"].to(curr_device)
-                            ry = data["rays"]
-                            rays = Rays(
-                                origins=ry.origins.to(curr_device),
-                                viewdirs=ry.viewdirs.to(curr_device),
-                            )
-                            pixels = data["pixels"].to(curr_device)
-                            dep = data["dep"].to(curr_device)
-                            sem_gt = data["sem"].to(curr_device)
+            # if flag:
+            #     optimizer.zero_grad()
+            #     print("step jumped")
+            #     continue
+            # else:
+            #     optimizer.step()
+            #     scheduler.step()
 
-                            # rendering
-                            (
-                                rgb,
-                                acc,
-                                depth,
-                                sem,
-                                _,
-                            ) = render_image_with_occgrid_test(
-                                1024,
-                                # scene
-                                radiance_field,
-                                estimator,
-                                rays,
-                                # rendering options
-                                near_plane=self.config_file["near_plane"],
-                                render_step_size=self.config_file["render_step_size"],
-                                render_bkgd=render_bkgd,
-                                cone_angle=self.config_file["cone_angle"],
-                                alpha_thre=self.config_file["alpha_thre"],
-                            )
-                            ground_truth_sem.append(sem_gt.cpu().numpy())
-                            sem_imgs.append(sem.cpu().numpy())
-                            self.sem_ce_ls.append(
-                                F.cross_entropy(
-                                    sem.reshape(
-                                        (-1, radiance_field.num_semantic_classes)
-                                    ),
-                                    sem_gt.flatten(),
-                                ).item()
-                            )
+            # if model_idx == 0 and step % 500:
+            #     self.learning_rate_lst.append(scheduler._last_lr)
 
-                            lpips_fn = lambda x, y: self.lpips_net.to(curr_device)(
-                                self.lpips_norm_fn(x), self.lpips_norm_fn(y)
-                            ).mean()
+            # # Evaluation
+            # if (
+            #     step == steps + 1
+            #     and (
+            #         (planning_step == 0)
+            #         or ((planning_step + 1) % 2 == 0)
+            #         or final_train
+            #     )
+            #     and model_idx == 0
+            # ):
+            #     radiance_field.eval()
+            #     estimator.eval()
 
-                            mse = F.mse_loss(rgb, pixels)
-                            psnr = -10.0 * torch.log(mse) / np.log(10.0)
-                            psnrs.append(psnr.item())
-                            lpips.append(lpips_fn(rgb, pixels).item())
+            #     psnrs = []
+            #     lpips = []
+            #     with torch.no_grad():
+            #         for i in tqdm.tqdm(range(num_test_images)):
+            #             data = self.test_dataset[test_idx[i]]
+            #             render_bkgd = data["color_bkgd"].to(curr_device)
+            #             ry = data["rays"]
+            #             rays = Rays(
+            #                 origins=ry.origins.to(curr_device),
+            #                 viewdirs=ry.viewdirs.to(curr_device),
+            #             )
+            #             pixels = data["pixels"].to(curr_device)
+            #             dep = data["dep"].to(curr_device)
+            #             sem_gt = data["sem"].to(curr_device)
 
-                            mse_dep = F.mse_loss(depth, dep.unsqueeze(2))
-                            mse_dep_lst[i].append(mse_dep.item())
-                            ground_truth_imgs.append(pixels.cpu().numpy())
-                            rendered_imgs[i].append(rgb.cpu().numpy())
+            #             # rendering
+            #             (
+            #                 rgb,
+            #                 acc,
+            #                 depth,
+            #                 sem,
+            #                 _,
+            #             ) = render_image_with_occgrid_test(
+            #                 1024,
+            #                 # scene
+            #                 radiance_field,
+            #                 estimator,
+            #                 rays,
+            #                 # rendering options
+            #                 near_plane=self.config_file["near_plane"],
+            #                 render_step_size=self.config_file["render_step_size"],
+            #                 render_bkgd=render_bkgd,
+            #                 cone_angle=self.config_file["cone_angle"],
+            #                 alpha_thre=self.config_file["alpha_thre"],
+            #             )
+            #             ground_truth_sem.append(sem_gt.cpu().numpy())
+            #             sem_imgs.append(sem.cpu().numpy())
+            #             self.sem_ce_ls.append(
+            #                 F.cross_entropy(
+            #                     sem.reshape(
+            #                         (-1, radiance_field.num_semantic_classes)
+            #                     ),
+            #                     sem_gt.flatten(),
+            #                 ).item()
+            #             )
 
-                            ground_truth_depth.append(dep.cpu().numpy())
-                            depth_imgs[i].append(depth.cpu().numpy())
-                            psnrs_lst[i].append(psnr.item())
-                            lpips_lst[i].append(lpips_fn(rgb, pixels).item())
+            #             lpips_fn = lambda x, y: self.lpips_net.to(curr_device)(
+            #                 self.lpips_norm_fn(x), self.lpips_norm_fn(y)
+            #             ).mean()
+
+            #             mse = F.mse_loss(rgb, pixels)
+            #             psnr = -10.0 * torch.log(mse) / np.log(10.0)
+            #             psnrs.append(psnr.item())
+            #             lpips.append(lpips_fn(rgb, pixels).item())
+
+            #             mse_dep = F.mse_loss(depth, dep.unsqueeze(2))
+            #             mse_dep_lst[i].append(mse_dep.item())
+            #             ground_truth_imgs.append(pixels.cpu().numpy())
+            #             rendered_imgs[i].append(rgb.cpu().numpy())
+
+            #             ground_truth_depth.append(dep.cpu().numpy())
+            #             depth_imgs[i].append(depth.cpu().numpy())
+            #             psnrs_lst[i].append(psnr.item())
+            #             lpips_lst[i].append(lpips_fn(rgb, pixels).item())
 
             ## Save checkpoit for video
             if (step + 1) % 1000 == 0:
@@ -1229,15 +1340,19 @@ class ActiveGaussSplatMapper:
                     flag = False
 
     def pipeline(self):
+        # Initialize training set with circular trajectory
         self.initialization()
 
-        self.nerf_training(self.config_file["training_steps"])
+        # Train initial model with this data
+        self.gauss_training(self.config_file["training_steps"])
+        # self.gaussModel.create_from_pcd(pcd=raw_points)
+
 
         self.planning(
             self.config_file["planning_step"], int(self.config_file["training_steps"])
         )
 
-        self.nerf_training(
+        self.gauss_training(
             self.config_file["training_steps"] * 5, final_train=True, planning_step=-10
         )
 
