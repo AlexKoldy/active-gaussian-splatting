@@ -31,20 +31,31 @@ import torch.nn.functional as F
 from lpips import LPIPS
 import cv2
 
-sys.path.append("perception/nerfacc")
-from nerfacc.estimators.occ_grid import OccGridEstimator
+# sys.path.append("perception/nerfacc")
+# from nerfacc.estimators.occ_grid import OccGridEstimator
 
 # nerfacc
-sys.path.append("perception/models")
-from datasets.utils import Rays
-from utils import (
-    render_image_with_occgrid,
-    render_image_with_occgrid_test,
-    render_image_with_occgrid_with_depth_guide,
-    render_probablistic_image_with_occgrid_test,
-)
-from radiance_fields.ngp import NGPRadianceField
+# sys.path.append("perception/models")
+# from datasets.utils import Rays
+# from utils import (
+#     render_image_with_occgrid,
+#     render_image_with_occgrid_test,
+#     render_image_with_occgrid_with_depth_guide,
+#     render_probablistic_image_with_occgrid_test,
+# )
+# from radiance_fields.ngp import NGPRadianceField
 
+from gaussian_splatting.trainer import Trainer
+import gaussian_splatting.utils.loss_utils as loss_utils
+from gaussian_splatting.utils.data_utils import get_camera, read_all
+from gaussian_splatting.utils.camera_utils import to_viewpoint_camera
+from gaussian_splatting.utils.point_utils import get_point_clouds
+from gaussian_splatting.gauss_model import GaussModel
+from gaussian_splatting.gauss_render import GaussRenderer
+from habitat_to_data import Dataset
+import contextlib
+from torch.profiler import profile, ProfilerActivity
+import gaussian_splatting.utils as utils
 
 # rotorpy
 sys.path.append("planning/rotorpy")
@@ -86,6 +97,67 @@ def parse_args():
         help="scene_dataset_self.config_file",
     )
     return parser.parse_args()
+
+class GSSTrainer(Trainer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.data = kwargs.get('data')
+        self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
+        self.lambda_dssim = 0.2
+        self.lambda_depth = 0.0
+        self.USE_GPU_PYTORCH = True
+        self.USE_PROFILE = False
+
+    def on_train_step(self):
+        ind = np.random.choice(len(self.data['camera']))
+        camera = self.data['camera'][ind]
+        rgb = self.data['rgb'][ind]
+        depth = self.data['depth'][ind]
+        mask = (self.data['alpha'][ind] > 0.5)
+        if self.USE_GPU_PYTORCH:
+            camera = to_viewpoint_camera(camera)
+
+        if self.USE_PROFILE:
+            prof = profile(activities=[ProfilerActivity.CUDA], with_stack=True)
+        else:
+            prof = contextlib.nullcontext()
+
+        with prof:
+            out = self.gaussRender(pc=self.model, camera=camera)
+
+        if self.USE_PROFILE:
+            print(prof.key_averages(group_by_stack_n=True).table(sort_by='self_cuda_time_total', row_limit=20))
+
+
+        l1_loss = loss_utils.l1_loss(out['render'], rgb)
+        depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
+        ssim_loss = 1.0-loss_utils.ssim(out['render'], rgb)
+
+        total_loss = (1-self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
+        #psnr = utils.img2psnr(out['render'], rgb)
+        log_dict = {'total': total_loss,'l1':l1_loss, 'ssim': ssim_loss, 'depth': depth_loss}#, 'psnr': psnr}
+
+        return total_loss, log_dict
+
+    def on_evaluate_step(self, **kwargs):
+        import matplotlib.pyplot as plt
+        ind = np.random.choice(len(self.data['camera']))
+        camera = self.data['camera'][ind]
+        if self.USE_GPU_PYTORCH:
+            camera = to_viewpoint_camera(camera)
+
+        rgb = self.data['rgb'][ind].detach().cpu().numpy()
+        out = self.gaussRender(pc=self.model, camera=camera)
+        rgb_pd = out['render'].detach().cpu().numpy()
+        depth_pd = out['depth'].detach().cpu().numpy()[..., 0]
+        depth = self.data['depth'][ind].detach().cpu().numpy()
+        depth = np.concatenate([depth, depth_pd], axis=1)
+        depth = (1 - depth / depth.max())
+        depth = plt.get_cmap('jet')(depth)[..., :3]
+        image = np.concatenate([rgb, rgb_pd], axis=1)
+        image = np.concatenate([image, depth], axis=0)
+        utils.imwrite(str(self.results_folder / f'image-{self.step}.png'), image)
+
 
 
 class ActiveGaussSplatMapper:
@@ -160,33 +232,36 @@ class ActiveGaussSplatMapper:
 
         # Change ensemble stuff to single model
         # for i in range(self.config_file["n_ensembles"]):
-        estimator = OccGridEstimator(
-            roi_aabb=self.aabb,
-            resolution=self.main_grid_resolution,
-            levels=self.config_file["main_grid_nlvl"],
-        ).to(self.config_file["cuda"])
+        # estimator = OccGridEstimator(
+        #     roi_aabb=self.aabb,
+        #     resolution=self.main_grid_resolution,
+        #     levels=self.config_file["main_grid_nlvl"],
+        # ).to(self.config_file["cuda"])
 
-        radiance_field = NGPRadianceField(
-            aabb=estimator.aabbs[-1],
-            neurons=self.config_file["main_neurons"],
-            layers=self.config_file["main_layer"],
-            num_semantic_classes=args.sem_num,
-        ).to(self.config_file["cuda"])
-        optimizer = torch.optim.Adam(
-            radiance_field.parameters(),
+        # radiance_field = NGPRadianceField(
+        #     aabb=estimator.aabbs[-1],
+        #     neurons=self.config_file["main_neurons"],
+        #     layers=self.config_file["main_layer"],
+        #     num_semantic_classes=args.sem_num,
+        # ).to(self.config_file["cuda"])
+
+        self.gaussModel = GaussModel(debug=False)
+
+        self.optimizer = torch.optim.Adam(
+            self.gaussModel.parameters(),
             lr=1e-3,
             eps=1e-15,
             weight_decay=self.config_file["weight_decay"],
         )
 
-        self.estimator = estimator
-        self.grad_scaler = (torch.cuda.amp.GradScaler(2**10))
-        self.radiance_field = radiance_field
-        self.optimizer = optimizer
+        # self.estimator = estimator
+        # self.grad_scaler = (torch.cuda.amp.GradScaler(2**10))
+        # self.radiance_field = radiance_field
+        # self.optimizer = optimizer
         self.scheduler = torch.optim.lr_scheduler.ChainedScheduler(
                 [
                     torch.optim.lr_scheduler.CyclicLR(
-                        optimizer,
+                        self.optimizer,
                         base_lr=1e-4,
                         max_lr=1e-3,
                         step_size_up=int(self.config_file["training_steps"] / 4),
@@ -269,7 +344,7 @@ class ActiveGaussSplatMapper:
         (
             sampled_images,
             sampled_depth_images,
-            sampled_sem_images,
+            # sampled_sem_images,
         ) = self.sim.sample_images_from_poses(sampled_poses_quat)
 
         # Updating cost map using observed depth values
@@ -356,22 +431,23 @@ class ActiveGaussSplatMapper:
 
         print("Initialization Finished")
 
-    def nerf_training(
+    
+    def gauss_training(
         self, steps, final_train=False, initial_train=False, planning_step=-1
     ):
-        print("Nerf Training Started")
+        print("3D Gaussian Model Training Started")
 
-        if final_train:
-            self.schedulers = []
-            for i in range(self.config_file["n_ensembles"]):
-                optimizer = self.optimizers[i]
-                self.schedulers.append(
-                    torch.optim.lr_scheduler.MultiStepLR(
-                        optimizer,
-                        milestones=[int(steps * 0.3), int(steps * 0.8)],
-                        gamma=0.1,
-                    )
-                )
+        # if final_train:
+        #     self.schedulers = []
+        #     for i in range(self.config_file["n_ensembles"]):
+        #         optimizer = self.optimizers[i]
+        #         self.schedulers.append(
+        #             torch.optim.lr_scheduler.MultiStepLR(
+        #                 optimizer,
+        #                 milestones=[int(steps * 0.3), int(steps * 0.8)],
+        #                 gamma=0.1,
+        #             )
+        #         )
 
         num_test_images = self.test_dataset.size
         test_idx = np.arange(num_test_images)
@@ -382,543 +458,578 @@ class ActiveGaussSplatMapper:
         #     density = radiance_field.query_density(x)
         #     return density * self.config_file["render_step_size"]
 
-        losses = [[], [], []]
+        # losses = [[], [], []]
 
-        for step in tqdm.tqdm(range(steps)):
-            # train and record the models in the ensemble
-            ground_truth_imgs = []
-            rendered_imgs = [[] for _ in range(num_test_images)]
+        # for step in tqdm.tqdm(range(steps)):
+        # train and record the models in the ensemble
+        # ground_truth_imgs = []
+        # # rendered_imgs = [[] for _ in range(num_test_images)]
+        # rendered_imgs = []
 
-            psnrs_lst = [[] for _ in range(num_test_images)]
-            lpips_lst = [[] for _ in range(num_test_images)]
+        # psnrs_lst = [[] for _ in range(num_test_images)]
+        # lpips_lst = [[] for _ in range(num_test_images)]
 
-            ground_truth_depth = []
-            depth_imgs = [[] for _ in range(num_test_images)]
-            mse_dep_lst = [[] for _ in range(num_test_images)]
+        # ground_truth_depth = []
+        # # depth_imgs = [[] for _ in range(num_test_images)]
+        # depth_imgs = []
+        # # mse_dep_lst = [[] for _ in range(num_test_images)]
+        # mse_dep_list = []
 
-            ground_truth_sem = []
-            sem_imgs = []
+        # ground_truth_sem = []
+        # sem_imgs = []
 
-            # training each model
-            for model_idx, (
-                radiance_field,
-                estimator,
-                optimizer,
-                scheduler,
-                grad_scaler,
-            ) in enumerate(
-                zip(
-                    self.radiance_fields,
-                    self.estimators,
-                    self.optimizers,
-                    self.schedulers,
-                    self.grad_scalers,
-                )
-            ):
-                curr_device = (
-                    self.config_file["cuda"]
-                    if model_idx == 0
-                    else self.config_file["cuda"]
-                )
-                radiance_field.train()
-                estimator.train()
+        # training each model
+        # for model_idx, (
+        #     radiance_field,
+        #     estimator,
+        #     optimizer,
+        #     scheduler,
+        #     grad_scaler,
+        # ) in enumerate(
+        #     zip(
+        #         self.radiance_fields,
+        #         self.estimators,
+        #         self.optimizers,
+        #         self.schedulers,
+        #         self.grad_scalers,
+        #     )
+        # ):
+        device = (
+            self.config_file["cuda"]
+            # if model_idx == 0
+            # else self.config_file["cuda"]
+        )
+        device = 'cuda'
+        # radiance_field.train()
+        # estimator.train()
 
-                c = np.random.random_sample()
+        trainset = self.train_dataset
+        data = {}
+        data['rgb'] = trainset.images / 255.0 # Check this line???
+        data['depth'] = trainset.depths
+        data['depth_range'] = torch.Tensor([[0,6]]*trainset.size).to(device)
+        data['alpha'] = torch.ones(trainset.depths.shape).to(device)
 
-                if c < 0.5 and not final_train and not initial_train:
-                    # train with most recent batch of data
-                    curr_idx = self.train_dataset.bootstrap(model_idx)
-                    curr_idx = curr_idx[
-                        curr_idx
-                        >= self.train_dataset.size - self.config_file["sample_disc"]
-                    ]
-                    i = np.random.choice(curr_idx, 1).item()
-                else:
-                    curr_idx = self.train_dataset.bootstrap(model_idx)
-                    i = np.random.choice(curr_idx, 1).item()
+        data['camera'] = get_camera(trainset.camtoworlds.cpu(), trainset.K.cpu()).to(device)
+        # print(data['camera'].shape)
+        points = get_point_clouds(data['camera'], trainset.depths, 
+                                torch.ones(trainset.depths.shape).to(device), 
+                                trainset.images / 255.0)
+        raw_points = points.random_sample(2**12)
+        self.gaussModel.create_from_pcd(pcd=raw_points)
+        render_kwargs = {'white_bkgd': True}
+        trainer = GSSTrainer(model=self.gaussModel, 
+            data=data,
+            train_batch_size=1, 
+            train_num_steps=steps,
+            i_image =100,
+            train_lr=1e-3, 
+            amp=False,
+            fp16=False,
+            results_folder='result/test',
+            render_kwargs=render_kwargs,
+        )
+        trainer.on_evaluate_step()
+        trainer.train()
 
-                data = self.train_dataset[i]
-                render_bkgd = data["color_bkgd"].to(curr_device)
-                ry = data["rays"]
-                rays = Rays(
-                    origins=ry.origins.to(curr_device),
-                    viewdirs=ry.viewdirs.to(curr_device),
-                )
-                pixels = data["pixels"].to(curr_device)
-                dep = data["dep"].to(curr_device)
-                sem = data["sem"].to(curr_device)
+            ############# OLD NERF TRAINING BELOW ##############
 
-                # update occupancy grid
-                if planning_step == -1:
-                    estimator.update_every_n_steps(
-                        step=step,
-                        occ_eval_fn=occ_eval_fn,
-                        occ_thre=1e-3,
-                    )
-                elif planning_step == -10:
-                    estimator.update_every_n_steps(
-                        step=step,
-                        occ_eval_fn=occ_eval_fn,
-                        occ_thre=1e-2,
-                    )
-                elif planning_step < 5:
-                    estimator.update_every_n_steps(
-                        step=step,
-                        occ_eval_fn=occ_eval_fn,
-                        occ_thre=1e-3,
-                    )
-                else:
-                    estimator.update_every_n_steps(
-                        step=step,
-                        occ_eval_fn=occ_eval_fn,
-                        occ_thre=3e-3,
-                    )
+            # c = np.random.random_sample()
 
-                (
-                    rgb,
-                    acc,
-                    depth,
-                    semantic,
-                    n_rendering_samples,
-                ) = render_image_with_occgrid_with_depth_guide(
-                    radiance_field,
-                    estimator,
-                    rays,
-                    # rendering options
-                    near_plane=self.config_file["near_plane"],
-                    render_step_size=self.config_file["render_step_size"],
-                    render_bkgd=render_bkgd,
-                    cone_angle=self.config_file["cone_angle"],
-                    alpha_thre=self.config_file["alpha_thre"],
-                    depth=dep,
-                )
+            # if c < 0.5 and not final_train and not initial_train:
+            #     # train with most recent batch of data
+            #     curr_idx = self.train_dataset.bootstrap(model_idx)
+            #     curr_idx = curr_idx[
+            #         curr_idx
+            #         >= self.train_dataset.size - self.config_file["sample_disc"]
+            #     ]
+            #     i = np.random.choice(curr_idx, 1).item()
+            # else:
+            #     curr_idx = self.train_dataset.bootstrap(model_idx)
+            #     i = np.random.choice(curr_idx, 1).item()
 
-                if n_rendering_samples == 0:
-                    continue
+            # data = self.train_dataset[i]
+            # render_bkgd = data["color_bkgd"].to(curr_device)
+            # ry = data["rays"]
+            # rays = Rays(
+            #     origins=ry.origins.to(curr_device),
+            #     viewdirs=ry.viewdirs.to(curr_device),
+            # )
+            # pixels = data["pixels"].to(curr_device)
+            # dep = data["dep"].to(curr_device)
+            # sem = data["sem"].to(curr_device)
 
-                # if self.config_file["target_sample_batch_size"] > 0:
-                #     # dynamic batch size for rays to keep sample batch size constant.
-                #     num_rays = len(pixels)
-                #     num_rays = int(
-                #         num_rays
-                #         * (
-                #             self.config_file["target_sample_batch_size"]
-                #             / float(n_rendering_samples)
-                #         )
-                #     )
-                #     self.train_dataset.update_num_rays(min(2000, num_rays))
+            # # # update occupancy grid
+            # # if planning_step == -1:
+            # #     estimator.update_every_n_steps(
+            # #         step=step,
+            # #         occ_eval_fn=occ_eval_fn,
+            # #         occ_thre=1e-3,
+            # #     )
+            # # elif planning_step == -10:
+            # #     estimator.update_every_n_steps(
+            # #         step=step,
+            # #         occ_eval_fn=occ_eval_fn,
+            # #         occ_thre=1e-2,
+            # #     )
+            # # elif planning_step < 5:
+            # #     estimator.update_every_n_steps(
+            # #         step=step,
+            # #         occ_eval_fn=occ_eval_fn,
+            # #         occ_thre=1e-3,
+            # #     )
+            # # else:
+            # #     estimator.update_every_n_steps(
+            # #         step=step,
+            # #         occ_eval_fn=occ_eval_fn,
+            # #         occ_thre=3e-3,
+            # #     )
 
-                # compute loss
-                loss_rgb = F.smooth_l1_loss(rgb, pixels)
-                loss_dep = F.smooth_l1_loss(depth, dep.unsqueeze(1))
-                loss_sem = F.cross_entropy(semantic, sem)
+            # (
+            #     rgb,
+            #     acc,
+            #     depth,
+            #     semantic,
+            #     n_rendering_samples,
+            # ) = render_image_with_occgrid_with_depth_guide(
+            #     radiance_field,
+            #     estimator,
+            #     rays,
+            #     # rendering options
+            #     near_plane=self.config_file["near_plane"],
+            #     render_step_size=self.config_file["render_step_size"],
+            #     render_bkgd=render_bkgd,
+            #     cone_angle=self.config_file["cone_angle"],
+            #     alpha_thre=self.config_file["alpha_thre"],
+            #     depth=dep,
+            # )
 
-                loss = loss_rgb * 10 + loss_dep / 5 + loss_sem / 2
+            # if n_rendering_samples == 0:
+            #     continue
 
-                losses[0].append(loss_rgb.detach().cpu().item())
-                losses[1].append(loss_dep.detach().cpu().item() / 50)
-                losses[2].append(loss_sem.detach().cpu().item() / 2)
+            # # if self.config_file["target_sample_batch_size"] > 0:
+            # #     # dynamic batch size for rays to keep sample batch size constant.
+            # #     num_rays = len(pixels)
+            # #     num_rays = int(
+            # #         num_rays
+            # #         * (
+            # #             self.config_file["target_sample_batch_size"]
+            # #             / float(n_rendering_samples)
+            # #         )
+            # #     )
+            # #     self.train_dataset.update_num_rays(min(2000, num_rays))
 
-                optimizer.zero_grad()
-                loss.backward()
+            # # compute loss
+            # loss_rgb = F.smooth_l1_loss(rgb, pixels)
+            # loss_dep = F.smooth_l1_loss(depth, dep.unsqueeze(1))
+            # loss_sem = F.cross_entropy(semantic, sem)
 
-                flag = False
-                for name, param in radiance_field.named_parameters():
-                    if torch.sum(torch.isnan(param.grad)) > 0:
-                        flag = True
-                        break
+            # loss = loss_rgb * 10 + loss_dep / 5 + loss_sem / 2
 
-                if flag:
-                    optimizer.zero_grad()
-                    print("step jumped")
-                    continue
-                else:
-                    optimizer.step()
-                    scheduler.step()
+            # losses[0].append(loss_rgb.detach().cpu().item())
+            # losses[1].append(loss_dep.detach().cpu().item() / 50)
+            # losses[2].append(loss_sem.detach().cpu().item() / 2)
 
-                if model_idx == 0 and step % 500:
-                    self.learning_rate_lst.append(scheduler._last_lr)
+            # optimizer.zero_grad()
+            # loss.backward()
 
-                # Evaluation
-                if (
-                    step == steps + 1
-                    and (
-                        (planning_step == 0)
-                        or ((planning_step + 1) % 2 == 0)
-                        or final_train
-                    )
-                    and model_idx == 0
-                ):
-                    radiance_field.eval()
-                    estimator.eval()
+            # flag = False
+            # for name, param in radiance_field.named_parameters():
+            #     if torch.sum(torch.isnan(param.grad)) > 0:
+            #         flag = True
+            #         break
 
-                    psnrs = []
-                    lpips = []
-                    with torch.no_grad():
-                        for i in tqdm.tqdm(range(num_test_images)):
-                            data = self.test_dataset[test_idx[i]]
-                            render_bkgd = data["color_bkgd"].to(curr_device)
-                            ry = data["rays"]
-                            rays = Rays(
-                                origins=ry.origins.to(curr_device),
-                                viewdirs=ry.viewdirs.to(curr_device),
-                            )
-                            pixels = data["pixels"].to(curr_device)
-                            dep = data["dep"].to(curr_device)
-                            sem_gt = data["sem"].to(curr_device)
+            # if flag:
+            #     optimizer.zero_grad()
+            #     print("step jumped")
+            #     continue
+            # else:
+            #     optimizer.step()
+            #     scheduler.step()
 
-                            # rendering
-                            (
-                                rgb,
-                                acc,
-                                depth,
-                                sem,
-                                _,
-                            ) = render_image_with_occgrid_test(
-                                1024,
-                                # scene
-                                radiance_field,
-                                estimator,
-                                rays,
-                                # rendering options
-                                near_plane=self.config_file["near_plane"],
-                                render_step_size=self.config_file["render_step_size"],
-                                render_bkgd=render_bkgd,
-                                cone_angle=self.config_file["cone_angle"],
-                                alpha_thre=self.config_file["alpha_thre"],
-                            )
-                            ground_truth_sem.append(sem_gt.cpu().numpy())
-                            sem_imgs.append(sem.cpu().numpy())
-                            self.sem_ce_ls.append(
-                                F.cross_entropy(
-                                    sem.reshape(
-                                        (-1, radiance_field.num_semantic_classes)
-                                    ),
-                                    sem_gt.flatten(),
-                                ).item()
-                            )
+            # if model_idx == 0 and step % 500:
+            #     self.learning_rate_lst.append(scheduler._last_lr)
 
-                            lpips_fn = lambda x, y: self.lpips_net.to(curr_device)(
-                                self.lpips_norm_fn(x), self.lpips_norm_fn(y)
-                            ).mean()
+            # # Evaluation
+            # if (
+            #     step == steps + 1
+            #     and (
+            #         (planning_step == 0)
+            #         or ((planning_step + 1) % 2 == 0)
+            #         or final_train
+            #     )
+            #     and model_idx == 0
+            # ):
+            #     radiance_field.eval()
+            #     estimator.eval()
 
-                            mse = F.mse_loss(rgb, pixels)
-                            psnr = -10.0 * torch.log(mse) / np.log(10.0)
-                            psnrs.append(psnr.item())
-                            lpips.append(lpips_fn(rgb, pixels).item())
+            #     psnrs = []
+            #     lpips = []
+            #     with torch.no_grad():
+            #         for i in tqdm.tqdm(range(num_test_images)):
+            #             data = self.test_dataset[test_idx[i]]
+            #             render_bkgd = data["color_bkgd"].to(curr_device)
+            #             ry = data["rays"]
+            #             rays = Rays(
+            #                 origins=ry.origins.to(curr_device),
+            #                 viewdirs=ry.viewdirs.to(curr_device),
+            #             )
+            #             pixels = data["pixels"].to(curr_device)
+            #             dep = data["dep"].to(curr_device)
+            #             sem_gt = data["sem"].to(curr_device)
 
-                            mse_dep = F.mse_loss(depth, dep.unsqueeze(2))
-                            mse_dep_lst[i].append(mse_dep.item())
-                            ground_truth_imgs.append(pixels.cpu().numpy())
-                            rendered_imgs[i].append(rgb.cpu().numpy())
+            #             # rendering
+            #             (
+            #                 rgb,
+            #                 acc,
+            #                 depth,
+            #                 sem,
+            #                 _,
+            #             ) = render_image_with_occgrid_test(
+            #                 1024,
+            #                 # scene
+            #                 radiance_field,
+            #                 estimator,
+            #                 rays,
+            #                 # rendering options
+            #                 near_plane=self.config_file["near_plane"],
+            #                 render_step_size=self.config_file["render_step_size"],
+            #                 render_bkgd=render_bkgd,
+            #                 cone_angle=self.config_file["cone_angle"],
+            #                 alpha_thre=self.config_file["alpha_thre"],
+            #             )
+            #             ground_truth_sem.append(sem_gt.cpu().numpy())
+            #             sem_imgs.append(sem.cpu().numpy())
+            #             self.sem_ce_ls.append(
+            #                 F.cross_entropy(
+            #                     sem.reshape(
+            #                         (-1, radiance_field.num_semantic_classes)
+            #                     ),
+            #                     sem_gt.flatten(),
+            #                 ).item()
+            #             )
 
-                            ground_truth_depth.append(dep.cpu().numpy())
-                            depth_imgs[i].append(depth.cpu().numpy())
-                            psnrs_lst[i].append(psnr.item())
-                            lpips_lst[i].append(lpips_fn(rgb, pixels).item())
+            #             lpips_fn = lambda x, y: self.lpips_net.to(curr_device)(
+            #                 self.lpips_norm_fn(x), self.lpips_norm_fn(y)
+            #             ).mean()
 
-            ## Save checkpoit for video
-            if (step + 1) % 1000 == 0:
-                self.render(np.array([self.current_pose]))
-                if not os.path.exists(self.save_path + "/checkpoints/"):
-                    os.makedirs(self.save_path + "/checkpoints/")
+            #             mse = F.mse_loss(rgb, pixels)
+            #             psnr = -10.0 * torch.log(mse) / np.log(10.0)
+            #             psnrs.append(psnr.item())
+            #             lpips.append(lpips_fn(rgb, pixels).item())
 
-                current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            #             mse_dep = F.mse_loss(depth, dep.unsqueeze(2))
+            #             mse_dep_lst[i].append(mse_dep.item())
+            #             ground_truth_imgs.append(pixels.cpu().numpy())
+            #             rendered_imgs[i].append(rgb.cpu().numpy())
 
-                checkpoint_path = (
-                    self.save_path
-                    + "/checkpoints/"
-                    + "model_"
-                    + str(current_time)
-                    + ".pth"
-                )
-                save_dict = {
-                    "occ_grid": self.estimators[0].binaries,
-                    "model": self.radiance_fields[0].state_dict(),
-                    "optimizer_state_dict": self.optimizers[0].state_dict(),
-                }
-                torch.save(save_dict, checkpoint_path)
-                print("Saved checkpoints at", checkpoint_path)
+            #             ground_truth_depth.append(dep.cpu().numpy())
+            #             depth_imgs[i].append(depth.cpu().numpy())
+            #             psnrs_lst[i].append(psnr.item())
+            #             lpips_lst[i].append(lpips_fn(rgb, pixels).item())
 
-            if step == steps + 1 and (
-                (planning_step == 0) or ((planning_step + 1) % 2 == 0) or final_train
-            ):
-                print("start evaluation")
+        ## Save checkpoit for video
+        if (step + 1) % 1000 == 0:
+            self.render(np.array([self.current_pose]))
+            if not os.path.exists(self.save_path + "/checkpoints/"):
+                os.makedirs(self.save_path + "/checkpoints/")
 
-                print("loss")
-                print(np.mean(np.array(losses), axis=1))
+            current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
-                eval_path = self.save_path + "/prediction/"
-                if not os.path.exists(eval_path):
-                    os.makedirs(eval_path)
+            checkpoint_path = (
+                self.save_path
+                + "/checkpoints/"
+                + "model_"
+                + str(current_time)
+                + ".pth"
+            )
+            save_dict = {
+                "occ_grid": self.estimators[0].binaries,
+                "model": self.radiance_fields[0].state_dict(),
+                "optimizer_state_dict": self.optimizers[0].state_dict(),
+            }
+            torch.save(save_dict, checkpoint_path)
+            print("Saved checkpoints at", checkpoint_path)
 
-                psnr_test = np.array(psnrs_lst)[:, 0]
-                depth_mse_test = np.array(mse_dep_lst)[:, 0]
-                sem_ce = np.array(self.sem_ce_ls)
-
-                print("Mean PSNR: " + str(np.mean(psnr_test)))
-                print("Mean Depth MSE: " + str(np.mean(depth_mse_test)))
-                print("Mean Semantic CE: " + str(np.mean(sem_ce)))
-                self.errors_hist.append(
-                    [
-                        planning_step,
-                        np.mean(psnr_test),
-                        np.mean(depth_mse_test),
-                        np.mean(sem_ce),
-                    ]
-                )
-
-    def probablistic_uncertainty(self, trajectory, step):
-        """uncertainty of each trajectory"""
-        rendered_imgs = [[] for _ in range(self.config_file["n_ensembles"])]
-        rendered_imgs_var = [[] for _ in range(self.config_file["n_ensembles"])]
-        depth_imgs = [[] for _ in range(self.config_file["n_ensembles"])]
-        depth_imgs_var = [[] for _ in range(self.config_file["n_ensembles"])]
-        acc_imgs = [[] for _ in range(self.config_file["n_ensembles"])]
-        sem_imgs = [[] for _ in range(self.config_file["n_ensembles"])]
-        num_sample = 40  # self.config_file["sample_disc"] + 5
-        for model_idx, (radiance_field, estimator) in enumerate(
-            zip(self.radiance_fields, self.estimators)
+        if step == steps + 1 and (
+            (planning_step == 0) or ((planning_step + 1) % 2 == 0) or final_train
         ):
-            curr_device = (
-                self.config_file["cuda"] if model_idx == 0 else self.config_file["cuda"]
-            )
+            print("start evaluation")
 
-            radiance_field.eval()
-            estimator.eval()
+            print("loss")
+            print(np.mean(np.array(losses), axis=1))
 
-            with torch.no_grad():
-                scale = 0.1
-                a = np.linspace(0, len(trajectory) - 20, 20)
-                b = np.linspace(len(trajectory) - 20, len(trajectory) - 1, 20)
-                unc_idx = np.hstack((a, b)).astype(int)
-                (
-                    rgb,
-                    rgb_var,
-                    depth,
-                    depth_var,
-                    acc,
-                    sem,
-                ) = Dataset.render_probablistic_image_from_pose(
-                    radiance_field,
-                    estimator,
-                    trajectory[unc_idx],
-                    self.config_file["img_w"],
-                    self.config_file["img_h"],
-                    self.focal,
-                    self.config_file["near_plane"],
-                    self.config_file["render_step_size"],
-                    scale,
-                    self.config_file["cone_angle"],
-                    self.config_file["alpha_thre"],
-                    4,
-                    curr_device,
-                )
+            eval_path = self.save_path + "/prediction/"
+            if not os.path.exists(eval_path):
+                os.makedirs(eval_path)
 
-                rendered_imgs[model_idx].append(rgb[-num_sample:])
-                rendered_imgs_var[model_idx].append(rgb_var[-num_sample:])
-                depth_imgs[model_idx].append(depth[-num_sample:])
-                depth_imgs_var[model_idx].append(depth_var[-num_sample:])
-                acc_imgs[model_idx].append(acc[-num_sample:])
-                sem_imgs[model_idx].append(sem[-num_sample:])
+            psnr_test = np.array(psnrs_lst)[:, 0]
+            depth_mse_test = np.array(mse_dep_lst)[:, 0]
+            sem_ce = np.array(self.sem_ce_ls)
 
-        rendered_imgs = np.array(rendered_imgs)
-        rendered_imgs_var = np.array(rendered_imgs_var)
-        depth_imgs = np.array(depth_imgs)
-        depth_imgs_var = np.array(depth_imgs_var)
-        acc_imgs = np.array(acc_imgs)
-        sem_imgs = np.array(sem_imgs)
-
-        # rgb predictive information
-        rgb_conditional_entropy = (
-            np.log(2 * np.pi * np.e * rendered_imgs_var + 1e-4) / 2
-        )
-        rgb_mean_conditional_entropy = np.mean(rgb_conditional_entropy, axis=0)
-
-        rgb_ensemble_variance = np.sum(rendered_imgs_var, axis=0) / 2
-        rgb_entropy = np.log(2 * np.pi * np.e * rgb_ensemble_variance + 1e-4) / 2
-
-        rgb_predictive_information = np.mean(rgb_entropy - rgb_mean_conditional_entropy)
-
-        # depth predictive information
-        depth_conditional_entropy = np.log(2 * np.pi * np.e * depth_imgs_var + 1e-4) / 2
-        depth_mean_conditional_entropy = np.mean(depth_conditional_entropy, axis=0)
-
-        depth_ensemble_variance = np.sum(depth_imgs_var, axis=0) / 2
-        depth_entropy = np.log(2 * np.pi * np.e * depth_ensemble_variance + 1e-4) / 2
-
-        depth_predictive_information = np.mean(
-            depth_entropy - depth_mean_conditional_entropy
-        )
-
-        # semantic entropy
-        sem_p = F.softmax(torch.from_numpy(sem_imgs), dim=-1).numpy()
-        sem_conditional_entropy = -np.sum(
-            (sem_p + 1e-4) * np.log(sem_p + 1e-4), axis=-1
-        )
-        sem_mean_conditional_entropy = np.mean(sem_conditional_entropy, axis=0)
-
-        sem_ensemble_p = np.mean(sem_p, axis=0)
-        sem_entropy = -np.sum(
-            (sem_ensemble_p + 1e-4) * np.log(sem_ensemble_p + 1e-4), axis=-1
-        )
-
-        sem_predictive_information = np.mean(sem_entropy - sem_mean_conditional_entropy)
-
-        # occupancy entropy
-        occ_conditional_entropy = -(acc_imgs + 1e-4) * np.log(acc_imgs + 1e-4) - (
-            1 - acc_imgs + 1e-4
-        ) * np.log(1 - acc_imgs + 1e-4)
-        occ_mean_conditional_entropy = np.mean(occ_conditional_entropy, axis=0)
-
-        occ_ensemble_p = np.mean(acc_imgs, axis=0)
-        occ_entropy = -(occ_ensemble_p + 1e-4) * np.log(occ_ensemble_p + 1e-4) - (
-            1 - occ_ensemble_p + 1e-4
-        ) * np.log(1 - occ_ensemble_p + 1e-4)
-
-        occ_predictive_information = np.mean(occ_entropy - occ_mean_conditional_entropy)
-
-        predictive_information = (
-            rgb_predictive_information
-            + depth_predictive_information
-            + sem_predictive_information * 3
-            + occ_predictive_information * 2
-        )
-
-        self.trajector_uncertainty_list[step - 1].append(
-            [
-                rgb_predictive_information,
-                depth_predictive_information,
-                sem_predictive_information * 3,
-                occ_predictive_information * 2,
-            ]
-        )
-        # print(
-        #     rgb_predictive_information,
-        #     depth_predictive_information,
-        #     sem_predictive_information * 3,
-        #     occ_predictive_information * 2,
-        # )
-        # print(predictive_information)
-        return predictive_information
-
-    def trajector_uncertainty(self, trajectory, step):
-        """uncertainty of each trajectory"""
-        rendered_imgs = []
-        depth_imgs = []
-        acc_imgs = []
-        sem_imgs = []
-        num_sample = 40  # self.config_file["sample_disc"] + 5
-        for model_idx, (radiance_field, estimator) in enumerate(
-            zip(self.radiance_fields, self.estimators)
-        ):
-            curr_device = (
-                self.config_file["cuda"] if model_idx == 0 else self.config_file["cuda"]
-            )
-
-            radiance_field.eval()
-            estimator.eval()
-
-            with torch.no_grad():
-                scale = 0.1
-                a = np.linspace(0, len(trajectory) - 20, 20)
-                b = np.linspace(len(trajectory) - 20, len(trajectory) - 1, 20)
-                unc_idx = np.hstack((a, b)).astype(int)
-                if model_idx == 0:
-                    rgb, depth, acc, sem = Dataset.render_image_from_pose(
-                        radiance_field,
-                        estimator,
-                        trajectory[unc_idx],
-                        self.config_file["img_w"],
-                        self.config_file["img_h"],
-                        self.focal,
-                        self.config_file["near_plane"],
-                        self.config_file["render_step_size"],
-                        scale,
-                        self.config_file["cone_angle"],
-                        self.config_file["alpha_thre"],
-                        4,
-                        curr_device,
-                    )
-                    sem_imgs.append(sem[-num_sample:])
-                else:
-                    rgb, depth, acc = Dataset.render_image_from_pose(
-                        radiance_field,
-                        estimator,
-                        trajectory[unc_idx],
-                        self.config_file["img_w"],
-                        self.config_file["img_h"],
-                        self.focal,
-                        self.config_file["near_plane"],
-                        self.config_file["render_step_size"],
-                        scale,
-                        self.config_file["cone_angle"],
-                        self.config_file["alpha_thre"],
-                        4,
-                        curr_device,
-                    )
-
-                rendered_imgs.append(rgb[-num_sample:])
-                depth_imgs.append(depth[-num_sample:])
-                acc_imgs.append(acc[-num_sample:])
-
-        # semantic uncertainty by entropy
-        rendered_imgs = np.array(rendered_imgs)
-        sem_imgs = np.array(sem_imgs)
-
-        sem_p = F.softmax(torch.from_numpy(sem_imgs), dim=-1).numpy()
-        sem_entropy = -np.sum(sem_p * np.log(sem_p + 1e-10), axis=-1)
-
-        depth_imgs = np.array(depth_imgs)
-
-        acc_imgs = np.array(acc_imgs[0]) + 1e-4
-
-        intensity_var = np.mean(np.var(rendered_imgs, axis=0), axis=-1)
-        depth_var = np.var(depth_imgs, axis=0)
-
-        # 0 ~ 20
-        intensity_var_mean = np.clip(np.mean(intensity_var, axis=(1, 2)) * 4000, 0, 100)
-        depth_var_mean = np.clip(np.mean(depth_var, axis=(1, 2)) * 50, 0, 100)
-        acc_inv_mean = np.mean(np.clip(1 / acc_imgs - 1, 0, 10000), axis=(1, 2))
-
-        if self.radiance_fields[0].num_semantic_classes > 0:
-            sem_entropy_mean = np.clip(
-                np.mean(sem_entropy, axis=(0, 2, 3)) * 50, 0, 100
-            )
-            uncertainty = (
-                intensity_var_mean + depth_var_mean + acc_inv_mean + sem_entropy_mean
-            )
-        else:
-            uncertainty = intensity_var_mean + depth_var_mean + acc_inv_mean
-
-        if step == -1:
-            max_idx = np.argsort(uncertainty)
-            max_idx = np.sort(max_idx)
-            uncertainty = np.mean(uncertainty[-11:])
-        else:
-            max_idx = np.argsort(uncertainty)
-            max_idx = np.sort(max_idx)
-            uncertainty = np.mean(uncertainty[max_idx])
-
-        if self.radiance_fields[0].num_semantic_classes > 0:
-            self.trajector_uncertainty_list[step - 1].append(
+            print("Mean PSNR: " + str(np.mean(psnr_test)))
+            print("Mean Depth MSE: " + str(np.mean(depth_mse_test)))
+            print("Mean Semantic CE: " + str(np.mean(sem_ce)))
+            self.errors_hist.append(
                 [
-                    intensity_var_mean[-num_sample:],
-                    depth_var_mean[-num_sample:],
-                    acc_inv_mean[-num_sample:],
-                    sem_entropy_mean[-num_sample:],
-                ]
-            )
-        else:
-            self.trajector_uncertainty_list[step - 1].append(
-                [
-                    intensity_var_mean[-num_sample:],
-                    depth_var_mean[-num_sample:],
-                    acc_inv_mean[-num_sample:],
+                    planning_step,
+                    np.mean(psnr_test),
+                    np.mean(depth_mse_test),
+                    np.mean(sem_ce),
                 ]
             )
 
-        return uncertainty, max_idx
+    # def probablistic_uncertainty(self, trajectory, step):
+    #     """uncertainty of each trajectory"""
+    #     rendered_imgs = [[] for _ in range(self.config_file["n_ensembles"])]
+    #     rendered_imgs_var = [[] for _ in range(self.config_file["n_ensembles"])]
+    #     depth_imgs = [[] for _ in range(self.config_file["n_ensembles"])]
+    #     depth_imgs_var = [[] for _ in range(self.config_file["n_ensembles"])]
+    #     acc_imgs = [[] for _ in range(self.config_file["n_ensembles"])]
+    #     sem_imgs = [[] for _ in range(self.config_file["n_ensembles"])]
+    #     num_sample = 40  # self.config_file["sample_disc"] + 5
+    #     for model_idx, (radiance_field, estimator) in enumerate(
+    #         zip(self.radiance_fields, self.estimators)
+    #     ):
+    #         curr_device = (
+    #             self.config_file["cuda"] if model_idx == 0 else self.config_file["cuda"]
+    #         )
+
+    #         radiance_field.eval()
+    #         estimator.eval()
+
+    #         with torch.no_grad():
+    #             scale = 0.1
+    #             a = np.linspace(0, len(trajectory) - 20, 20)
+    #             b = np.linspace(len(trajectory) - 20, len(trajectory) - 1, 20)
+    #             unc_idx = np.hstack((a, b)).astype(int)
+    #             (
+    #                 rgb,
+    #                 rgb_var,
+    #                 depth,
+    #                 depth_var,
+    #                 acc,
+    #                 sem,
+    #             ) = Dataset.render_probablistic_image_from_pose(
+    #                 radiance_field,
+    #                 estimator,
+    #                 trajectory[unc_idx],
+    #                 self.config_file["img_w"],
+    #                 self.config_file["img_h"],
+    #                 self.focal,
+    #                 self.config_file["near_plane"],
+    #                 self.config_file["render_step_size"],
+    #                 scale,
+    #                 self.config_file["cone_angle"],
+    #                 self.config_file["alpha_thre"],
+    #                 4,
+    #                 curr_device,
+    #             )
+
+    #             rendered_imgs[model_idx].append(rgb[-num_sample:])
+    #             rendered_imgs_var[model_idx].append(rgb_var[-num_sample:])
+    #             depth_imgs[model_idx].append(depth[-num_sample:])
+    #             depth_imgs_var[model_idx].append(depth_var[-num_sample:])
+    #             acc_imgs[model_idx].append(acc[-num_sample:])
+    #             sem_imgs[model_idx].append(sem[-num_sample:])
+
+    #     rendered_imgs = np.array(rendered_imgs)
+    #     rendered_imgs_var = np.array(rendered_imgs_var)
+    #     depth_imgs = np.array(depth_imgs)
+    #     depth_imgs_var = np.array(depth_imgs_var)
+    #     acc_imgs = np.array(acc_imgs)
+    #     sem_imgs = np.array(sem_imgs)
+
+    #     # rgb predictive information
+    #     rgb_conditional_entropy = (
+    #         np.log(2 * np.pi * np.e * rendered_imgs_var + 1e-4) / 2
+    #     )
+    #     rgb_mean_conditional_entropy = np.mean(rgb_conditional_entropy, axis=0)
+
+    #     rgb_ensemble_variance = np.sum(rendered_imgs_var, axis=0) / 2
+    #     rgb_entropy = np.log(2 * np.pi * np.e * rgb_ensemble_variance + 1e-4) / 2
+
+    #     rgb_predictive_information = np.mean(rgb_entropy - rgb_mean_conditional_entropy)
+
+    #     # depth predictive information
+    #     depth_conditional_entropy = np.log(2 * np.pi * np.e * depth_imgs_var + 1e-4) / 2
+    #     depth_mean_conditional_entropy = np.mean(depth_conditional_entropy, axis=0)
+
+    #     depth_ensemble_variance = np.sum(depth_imgs_var, axis=0) / 2
+    #     depth_entropy = np.log(2 * np.pi * np.e * depth_ensemble_variance + 1e-4) / 2
+
+    #     depth_predictive_information = np.mean(
+    #         depth_entropy - depth_mean_conditional_entropy
+    #     )
+
+    #     # semantic entropy
+    #     sem_p = F.softmax(torch.from_numpy(sem_imgs), dim=-1).numpy()
+    #     sem_conditional_entropy = -np.sum(
+    #         (sem_p + 1e-4) * np.log(sem_p + 1e-4), axis=-1
+    #     )
+    #     sem_mean_conditional_entropy = np.mean(sem_conditional_entropy, axis=0)
+
+    #     sem_ensemble_p = np.mean(sem_p, axis=0)
+    #     sem_entropy = -np.sum(
+    #         (sem_ensemble_p + 1e-4) * np.log(sem_ensemble_p + 1e-4), axis=-1
+    #     )
+
+    #     sem_predictive_information = np.mean(sem_entropy - sem_mean_conditional_entropy)
+
+    #     # occupancy entropy
+    #     occ_conditional_entropy = -(acc_imgs + 1e-4) * np.log(acc_imgs + 1e-4) - (
+    #         1 - acc_imgs + 1e-4
+    #     ) * np.log(1 - acc_imgs + 1e-4)
+    #     occ_mean_conditional_entropy = np.mean(occ_conditional_entropy, axis=0)
+
+    #     occ_ensemble_p = np.mean(acc_imgs, axis=0)
+    #     occ_entropy = -(occ_ensemble_p + 1e-4) * np.log(occ_ensemble_p + 1e-4) - (
+    #         1 - occ_ensemble_p + 1e-4
+    #     ) * np.log(1 - occ_ensemble_p + 1e-4)
+
+    #     occ_predictive_information = np.mean(occ_entropy - occ_mean_conditional_entropy)
+
+    #     predictive_information = (
+    #         rgb_predictive_information
+    #         + depth_predictive_information
+    #         + sem_predictive_information * 3
+    #         + occ_predictive_information * 2
+    #     )
+
+    #     self.trajector_uncertainty_list[step - 1].append(
+    #         [
+    #             rgb_predictive_information,
+    #             depth_predictive_information,
+    #             sem_predictive_information * 3,
+    #             occ_predictive_information * 2,
+    #         ]
+    #     )
+    #     # print(
+    #     #     rgb_predictive_information,
+    #     #     depth_predictive_information,
+    #     #     sem_predictive_information * 3,
+    #     #     occ_predictive_information * 2,
+    #     # )
+    #     # print(predictive_information)
+    #     return predictive_information
+
+    # def trajector_uncertainty(self, trajectory, step):
+    #     """uncertainty of each trajectory"""
+    #     rendered_imgs = []
+    #     depth_imgs = []
+    #     acc_imgs = []
+    #     sem_imgs = []
+    #     num_sample = 40  # self.config_file["sample_disc"] + 5
+    #     for model_idx, (radiance_field, estimator) in enumerate(
+    #         zip(self.radiance_fields, self.estimators)
+    #     ):
+    #         curr_device = (
+    #             self.config_file["cuda"] if model_idx == 0 else self.config_file["cuda"]
+    #         )
+
+    #         radiance_field.eval()
+    #         estimator.eval()
+
+    #         with torch.no_grad():
+    #             scale = 0.1
+    #             a = np.linspace(0, len(trajectory) - 20, 20)
+    #             b = np.linspace(len(trajectory) - 20, len(trajectory) - 1, 20)
+    #             unc_idx = np.hstack((a, b)).astype(int)
+    #             if model_idx == 0:
+    #                 rgb, depth, acc, sem = Dataset.render_image_from_pose(
+    #                     radiance_field,
+    #                     estimator,
+    #                     trajectory[unc_idx],
+    #                     self.config_file["img_w"],
+    #                     self.config_file["img_h"],
+    #                     self.focal,
+    #                     self.config_file["near_plane"],
+    #                     self.config_file["render_step_size"],
+    #                     scale,
+    #                     self.config_file["cone_angle"],
+    #                     self.config_file["alpha_thre"],
+    #                     4,
+    #                     curr_device,
+    #                 )
+    #                 sem_imgs.append(sem[-num_sample:])
+    #             else:
+    #                 rgb, depth, acc = Dataset.render_image_from_pose(
+    #                     radiance_field,
+    #                     estimator,
+    #                     trajectory[unc_idx],
+    #                     self.config_file["img_w"],
+    #                     self.config_file["img_h"],
+    #                     self.focal,
+    #                     self.config_file["near_plane"],
+    #                     self.config_file["render_step_size"],
+    #                     scale,
+    #                     self.config_file["cone_angle"],
+    #                     self.config_file["alpha_thre"],
+    #                     4,
+    #                     curr_device,
+    #                 )
+
+    #             rendered_imgs.append(rgb[-num_sample:])
+    #             depth_imgs.append(depth[-num_sample:])
+    #             acc_imgs.append(acc[-num_sample:])
+
+    #     # semantic uncertainty by entropy
+    #     rendered_imgs = np.array(rendered_imgs)
+    #     sem_imgs = np.array(sem_imgs)
+
+    #     sem_p = F.softmax(torch.from_numpy(sem_imgs), dim=-1).numpy()
+    #     sem_entropy = -np.sum(sem_p * np.log(sem_p + 1e-10), axis=-1)
+
+    #     depth_imgs = np.array(depth_imgs)
+
+    #     acc_imgs = np.array(acc_imgs[0]) + 1e-4
+
+    #     intensity_var = np.mean(np.var(rendered_imgs, axis=0), axis=-1)
+    #     depth_var = np.var(depth_imgs, axis=0)
+
+    #     # 0 ~ 20
+    #     intensity_var_mean = np.clip(np.mean(intensity_var, axis=(1, 2)) * 4000, 0, 100)
+    #     depth_var_mean = np.clip(np.mean(depth_var, axis=(1, 2)) * 50, 0, 100)
+    #     acc_inv_mean = np.mean(np.clip(1 / acc_imgs - 1, 0, 10000), axis=(1, 2))
+
+    #     if self.radiance_fields[0].num_semantic_classes > 0:
+    #         sem_entropy_mean = np.clip(
+    #             np.mean(sem_entropy, axis=(0, 2, 3)) * 50, 0, 100
+    #         )
+    #         uncertainty = (
+    #             intensity_var_mean + depth_var_mean + acc_inv_mean + sem_entropy_mean
+    #         )
+    #     else:
+    #         uncertainty = intensity_var_mean + depth_var_mean + acc_inv_mean
+
+    #     if step == -1:
+    #         max_idx = np.argsort(uncertainty)
+    #         max_idx = np.sort(max_idx)
+    #         uncertainty = np.mean(uncertainty[-11:])
+    #     else:
+    #         max_idx = np.argsort(uncertainty)
+    #         max_idx = np.sort(max_idx)
+    #         uncertainty = np.mean(uncertainty[max_idx])
+
+    #     if self.radiance_fields[0].num_semantic_classes > 0:
+    #         self.trajector_uncertainty_list[step - 1].append(
+    #             [
+    #                 intensity_var_mean[-num_sample:],
+    #                 depth_var_mean[-num_sample:],
+    #                 acc_inv_mean[-num_sample:],
+    #                 sem_entropy_mean[-num_sample:],
+    #             ]
+    #         )
+    #     else:
+    #         self.trajector_uncertainty_list[step - 1].append(
+    #             [
+    #                 intensity_var_mean[-num_sample:],
+    #                 depth_var_mean[-num_sample:],
+    #                 acc_inv_mean[-num_sample:],
+    #             ]
+    #         )
+
+    #     return uncertainty, max_idx
 
     def render(self, traj):
         traj1 = np.copy(traj)
@@ -1032,9 +1143,9 @@ class ActiveGaussSplatMapper:
 
         current_state = self.global_origin[:3]
 
-        def occ_eval_fn(x):
-            density = self.radiance_field.query_density(x)
-            return density * self.config_file["render_step_size"]
+        # def occ_eval_fn(x):
+        #     density = self.radiance_field.query_density(x)
+        #     return density * self.config_file["render_step_size"]
 
         sim_step = 0
 
@@ -1044,14 +1155,14 @@ class ActiveGaussSplatMapper:
             print("planning step: " + str(step))
             step += 1
 
-            # get voxel grid
-            voxel_grid = self.estimators[0].binaries
-            voxel_grid = voxel_grid.cpu().numpy()
-            vg = np.swapaxes(voxel_grid, 2, 3)
+            # # get voxel grid
+            # voxel_grid = self.estimators[0].binaries
+            # voxel_grid = voxel_grid.cpu().numpy()
+            # vg = np.swapaxes(voxel_grid, 2, 3)
 
-            voxel_grid1 = self.estimators[1].binaries
-            voxel_grid1 = voxel_grid1.cpu().numpy()
-            vg1 = np.swapaxes(voxel_grid1, 2, 3)
+            # voxel_grid1 = self.estimators[1].binaries
+            # voxel_grid1 = voxel_grid1.cpu().numpy()
+            # vg1 = np.swapaxes(voxel_grid1, 2, 3)
 
             print("sampling trajectory from: " + str(current_state))
 
@@ -1064,6 +1175,8 @@ class ActiveGaussSplatMapper:
             aabb[2] = self.aabb[1]
             aabb[4] = self.aabb[5]
             aabb[5] = self.aabb[4]
+
+            ## Replace part below with RRT
 
             N_sample_traj_pose = sample_traj(
                 voxel_grid=np.array([vg, vg1]),
@@ -1150,66 +1263,66 @@ class ActiveGaussSplatMapper:
                 )
 
                 current_state = N_sample_traj_pose[best_index][unc_idx][-1, :3]
-            elif self.policy_type == "random":
-                uncertainty, mid = self.trajector_uncertainty(
-                    N_sample_traj_pose[0], step
-                )
+            # elif self.policy_type == "random":
+            #     uncertainty, mid = self.trajector_uncertainty(
+            #         N_sample_traj_pose[0], step
+            #     )
 
-                (
-                    sampled_images,
-                    sampled_depth_images,
-                    sampled_sem_images,
-                ) = self.sim.sample_images_from_poses(N_sample_traj_pose[0])
-                best_index = 0
+            #     (
+            #         sampled_images,
+            #         sampled_depth_images,
+            #         sampled_sem_images,
+            #     ) = self.sim.sample_images_from_poses(N_sample_traj_pose[0])
+            #     best_index = 0
 
-                sampled_images = sampled_images[:, :, :, :3]
+            #     sampled_images = sampled_images[:, :, :, :3]
 
-                self.render(N_sample_traj_pose[best_index][1:])
+            #     self.render(N_sample_traj_pose[best_index][1:])
 
-                sampled_poses_mat = []
-                for pose in N_sample_traj_pose[best_index]:
-                    T = np.eye(4)
-                    T[:3, :3] = R.from_quat(pose[3:]).as_matrix()
-                    T[:3, 3] = pose[:3]
-                    sampled_poses_mat.append(T)
+            #     sampled_poses_mat = []
+            #     for pose in N_sample_traj_pose[best_index]:
+            #         T = np.eye(4)
+            #         T[:3, :3] = R.from_quat(pose[3:]).as_matrix()
+            #         T[:3, 3] = pose[:3]
+            #         sampled_poses_mat.append(T)
 
-                for i, d_img in enumerate(sampled_depth_images):
-                    d_points = d_img[int(d_img.shape[0] / 2)]
-                    R_m = sampled_poses_mat[i][:3, :3]
-                    euler = R.from_matrix(R_m).as_euler("yzx")
-                    d_angles = (self.align_angles + euler[0]) % (2 * np.pi)
-                    w_loc = sampled_poses_mat[i][:3, 3]
-                    grid_loc = np.array(
-                        (w_loc - self.aabb.cpu().numpy()[:3])
-                        // self.config_file["main_grid_size"],
-                        dtype=int,
-                    )
-                    self.cost_map = update_cost_map(
-                        self.cost_map,
-                        d_points,
-                        d_angles,
-                        grid_loc,
-                        self.aabb.cpu().numpy(),
-                        self.config_file["main_grid_size"],
-                    )
+            #     for i, d_img in enumerate(sampled_depth_images):
+            #         d_points = d_img[int(d_img.shape[0] / 2)]
+            #         R_m = sampled_poses_mat[i][:3, :3]
+            #         euler = R.from_matrix(R_m).as_euler("yzx")
+            #         d_angles = (self.align_angles + euler[0]) % (2 * np.pi)
+            #         w_loc = sampled_poses_mat[i][:3, 3]
+            #         grid_loc = np.array(
+            #             (w_loc - self.aabb.cpu().numpy()[:3])
+            #             // self.config_file["main_grid_size"],
+            #             dtype=int,
+            #         )
+            #         self.cost_map = update_cost_map(
+            #             self.cost_map,
+            #             d_points,
+            #             d_angles,
+            #             grid_loc,
+            #             self.aabb.cpu().numpy(),
+            #             self.config_file["main_grid_size"],
+            #         )
 
-                self.train_dataset.update_data(
-                    sampled_images,
-                    sampled_depth_images,
-                    sampled_sem_images,
-                    sampled_poses_mat,
-                )
+            #     self.train_dataset.update_data(
+            #         sampled_images,
+            #         sampled_depth_images,
+            #         sampled_sem_images,
+            #         sampled_poses_mat,
+            #     )
 
-                current_state = N_sample_traj_pose[best_index][-1, :3]
+            #     current_state = N_sample_traj_pose[best_index][-1, :3]
 
-                self.current_pose = N_sample_traj_pose[best_index][-1]
+            #     self.current_pose = N_sample_traj_pose[best_index][-1]
 
-            elif self.policy_type == "spatial":
-                (
-                    sampled_images,
-                    sampled_depth_images,
-                    sampled_sem_images,
-                ) = None
+            # elif self.policy_type == "spatial":
+            #     (
+            #         sampled_images,
+            #         sampled_depth_images,
+            #         sampled_sem_images,
+            #     ) = None
 
             print("plan finished at: " + str(current_state))
 
@@ -1229,15 +1342,19 @@ class ActiveGaussSplatMapper:
                     flag = False
 
     def pipeline(self):
+        # Initialize training set with circular trajectory
         self.initialization()
 
-        self.nerf_training(self.config_file["training_steps"])
+        # Train initial model with this data
+        self.gauss_training(self.config_file["training_steps"])
+        # self.gaussModel.create_from_pcd(pcd=raw_points)
+
 
         self.planning(
             self.config_file["planning_step"], int(self.config_file["training_steps"])
         )
 
-        self.nerf_training(
+        self.gauss_training(
             self.config_file["training_steps"] * 5, final_train=True, planning_step=-10
         )
 
