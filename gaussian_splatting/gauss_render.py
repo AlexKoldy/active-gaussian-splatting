@@ -42,13 +42,13 @@ def build_rotation(r):
 
 def build_scaling_rotation(s, r):
     L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
-    # R = build_rotation(r)
+    R = build_rotation(r)
 
     L[:,0,0] = s[:,0]
-    L[:,1,1] = s[:,0]
-    L[:,2,2] = s[:,0]
+    L[:,1,1] = s[:,1]
+    L[:,2,2] = s[:,2]
 
-    # L = R @ L
+    L = R @ L
     return L
 
 
@@ -230,7 +230,7 @@ class GaussRenderer(nn.Module):
         means3D = pc.get_xyz
         opacity = pc.get_opacity
         scales = pc.get_scaling
-        # rotations = pc.get_rotation
+        rotations = pc.get_rotation
         shs = pc.get_features
         in_mask = torch.ones(len(means3D))
         
@@ -252,8 +252,8 @@ class GaussRenderer(nn.Module):
             color = shs
         
         with prof("build cov3d"):
-            # cov3d = build_covariance_3d(scales, rotations)
-            cov3d = build_covariance_3d(scales, None)
+            cov3d = build_covariance_3d(scales, rotations)
+            # cov3d = build_covariance_3d(scales, None)
             
         with prof("build cov2d"):
             cov2d = build_covariance_2d(

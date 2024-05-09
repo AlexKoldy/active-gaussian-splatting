@@ -40,8 +40,8 @@ class GaussModel(nn.Module):
         #     symm = strip_symmetric(actual_covariance)
         #     return symm
         
-        def build_covariance_from_scaling_rotation(scaling_modifier, rotation):
-            L = build_scaling_rotation(scaling_modifier, rotation)
+        def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
+            L = build_scaling_rotation(scaling_modifier * scaling, rotation)
             actual_covariance = L @ L.transpose(1, 2)
             symm = strip_symmetric(actual_covariance)
             return symm
@@ -90,9 +90,9 @@ class GaussModel(nn.Module):
         features[:, :3] = fused_color
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(points)).float().cuda()), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[...,None]#.repeat(1, 3)
-        # rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        # rots[:, 0] = 1
+        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         if self.debug:
@@ -105,7 +105,7 @@ class GaussModel(nn.Module):
         # self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:].contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
-        # self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
         return self
