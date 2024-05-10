@@ -17,7 +17,8 @@ from scipy.spatial.transform import Rotation as R
 
 # matplotlib.use("Agg")
 import matplotlib
-from skimage import color, io
+
+# from skimage import color, io
 
 # from habitat_sim.utils.common import d3_40_colors_rgb
 
@@ -28,7 +29,8 @@ import matplotlib.colors
 
 import torch
 import torch.nn.functional as F
-from lpips import LPIPS
+
+# from lpips import LPIPS
 import cv2
 
 
@@ -48,7 +50,7 @@ import gaussian_splatting.utils as utils
 
 # habitat simulator
 sys.path.append("simulator")
-from simulator import HabitatSim
+from simulator import Simulator
 
 from rapidly_exploring_random_tree_planner import RapidlyExploringRandomTreePlanner
 
@@ -108,12 +110,12 @@ class GSSTrainer(Trainer):
         with prof:
             out = self.gaussRender(pc=self.model, camera=camera)
 
-        if self.USE_PROFILE:
-            print(
-                prof.key_averages(group_by_stack_n=True).table(
-                    sort_by="self_cuda_time_total", row_limit=20
-                )
-            )
+        # if self.USE_PROFILE:
+        #     print(
+        #         prof.key_averages(group_by_stack_n=True).table(
+        #             sort_by="self_cuda_time_total", row_limit=20
+        #         )
+        #     )
 
         l1_loss = loss_utils.l1_loss(out["render"], rgb)
         depth_loss = loss_utils.l1_loss(out["depth"][..., 0][mask], depth[mask])
@@ -160,21 +162,17 @@ class ActiveGaussSplatMapper:
         print("Parameters Loading")
         # initialize radiance field, estimator, optimzer, and dataset
 
-        with open(f"scripts/config_" + args.habitat_scene + ".yaml", "r") as f:
+        with open(f"config_" + args.habitat_scene + ".yaml", "r") as f:
             self.config_file = yaml.safe_load(f)
 
-        self.save_path = (
-            self.config_file["save_path"]
-            + "/"
-            + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        )
+        self.save_path = self.config_file["save_path"] + "/"
 
-        self.learning_rate_lst = []
+        # self.learning_rate_lst = []
 
         # scene parameters
-        self.aabb = torch.tensor(
-            self.config_file["aabb"], device=self.config_file["cuda"]
-        )
+        # self.aabb = torch.tensor(
+        #     self.config_file["aabb"], device=self.config_file["cuda"]
+        # )
 
         self.train_dataset = None
         self.test_dataset = None
@@ -226,11 +224,14 @@ class ActiveGaussSplatMapper:
 
         self.current_pose = np.array(self.config_file["global_origin"])
 
-        self.sim = HabitatSim(
-            args.habitat_scene,
-            args.habitat_config_file,
-            img_w=self.config_file["img_w"],
-            img_h=self.config_file["img_h"],
+        data_path = os.path.join(os.getcwd(), "data")
+        path_to_scene_file = os.path.join(
+            data_path, "versioned_data/habitat_test_scenes/apartment_1.glb"
+        )
+
+        self.sim = Simulator(
+            # args.habitat_scene,
+            path_to_scene_file
         )
 
         self.planning_step = 25
@@ -278,7 +279,7 @@ class ActiveGaussSplatMapper:
             sampled_images,
             sampled_depth_images,
             # sampled_sem_images,
-        ) = self.sim.sample_images_from_poses(sampled_poses_quat)
+        ) = self.sim.sample_images_from_poses(sampled_poses_mat)
 
         # Updating cost map using observed depth values
         # We can take this out
@@ -451,19 +452,19 @@ class ActiveGaussSplatMapper:
                 torch.ones(trainset.depths.shape).to(device),
                 trainset.images / 255.0,
             )
-            raw_points = points.random_sample(2**12)
+            raw_points = points.random_sample(2**14)
             self.gaussModel.create_from_pcd(pcd=raw_points)
         render_kwargs = {"white_bkgd": True}
         trainer = GSSTrainer(
             model=self.gaussModel,
             data=data,
             train_batch_size=1,
-            train_num_steps=steps,
+            train_num_steps=steps / 100,
             i_image=100,
             train_lr=1e-3,
             amp=False,
             fp16=False,
-            results_folder="result/train",
+            results_folder="result",
             render_kwargs=render_kwargs,
         )
         # trainer.on_evaluate_step()
@@ -691,11 +692,11 @@ class ActiveGaussSplatMapper:
             # xyz_state[1] = current_state[2]
             # xyz_state[2] = current_state[1]
 
-            aabb = np.copy(self.aabb.cpu().numpy())
-            aabb[1] = self.aabb[2]
-            aabb[2] = self.aabb[1]
-            aabb[4] = self.aabb[5]
-            aabb[5] = self.aabb[4]
+            # aabb = np.copy(self.aabb.cpu().numpy())
+            # aabb[1] = self.aabb[2]
+            # aabb[2] = self.aabb[1]
+            # aabb[4] = self.aabb[5]
+            # aabb[5] = self.aabb[4]
 
             # Sample end points using current model's Gaussian locations
             num_samples = 10
@@ -819,19 +820,25 @@ class ActiveGaussSplatMapper:
         self.initialization()
 
         # Train initial model with this data
-        self.gauss_training(self.config_file["training_steps"])
+        self.gauss_training(self.config_file["training_steps"], initial_train=True)
         # self.gaussModel.create_from_pcd(pcd=raw_points)
 
-        self.planning(int(self.config_file["training_steps"]))
+        plan = False
 
-        self.gauss_training(self.config_file["training_steps"] * 5, final_train=True)
+        if plan:
 
-        # plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
-        # plt.savefig(self.save_path + "/learning_rate.png")
+            self.planning(int(self.config_file["training_steps"]))
 
-        # plt.yscale("log")
-        # plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
-        # plt.savefig(self.save_path + "/learning_rate_log.png")
+            self.gauss_training(
+                self.config_file["training_steps"] * 5, final_train=True
+            )
+
+            # plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
+            # plt.savefig(self.save_path + "/learning_rate.png")
+
+            # plt.yscale("log")
+            # plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
+            # plt.savefig(self.save_path + "/learning_rate_log.png")
 
         # save radiance field, estimator, and optimzer
         print("Saving Models")
@@ -843,7 +850,9 @@ class ActiveGaussSplatMapper:
         if not os.path.exists(self.save_path + "/checkpoints/"):
             os.makedirs(self.save_path + "/checkpoints/")
 
-        self.gaussModel.save_ply(self.save_path)
+        self.gaussModel.save_ply(
+            self.save_path + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        )
 
         # self.trajector_uncertainty_list = np.array(self.trajector_uncertainty_list)
         # np.save(self.save_path + "/uncertainty.npy", self.trajector_uncertainty_list)

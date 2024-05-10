@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 import habitat_sim
+from scipy.spatial.transform import Rotation as R
 
 
 class Simulator:
@@ -100,11 +101,11 @@ class Simulator:
         Returns:
             (np.ndarray): RGB, depth values as numpy array of shape (height, width, 4)
         """
-        
+
         # # move quad out of scene so it doesn't show up in the images
         # quad_state = self.get_quad_state()
         # self.set_agent_state(position=np.array([0.0, 0.0, 0.0]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
-        
+
         # Get RGBA data from the color camera
         rgba = self.sim.get_sensor_observations(0)["color_sensor"]
 
@@ -123,7 +124,7 @@ class Simulator:
 
         # Concatenate the data and return it. The alpha value is not returned
         return np.concatenate((rgba[:, :, :-1], np.expand_dims(depth, axis=2)), axis=2)
-    
+
     def sample_images_from_poses(self, poses):
         """
         sample images from list of poses
@@ -135,20 +136,21 @@ class Simulator:
             list of images
         """
         # move quad out of scene so it doesn't show up in the images
-        quad_state = self.agent.get_state()
+        # quad_state = self.agent.get_state()
 
         rgbs = []
         depths = []
         for pose in poses:
-            self.set_agent_state(pose)
+            orientation = R.from_matrix(pose[:3, :3]).as_quat()
+            position = pose[:3, 3]
+            self.set_agent_state(position, orientation)
             rgbd = self.collect_image_data()
             # rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
             rgbs.append(rgbd[:, :, :-1])
             depths.append(rgbd[:, :, -1])
-        
 
         # move quad back to original position
-        self.set_agent_state(quad_state)
+        # self.set_agent_state(quad_state)
         return np.array(rgbs), np.array(depths)
 
 
@@ -159,8 +161,12 @@ if __name__ == "__main__":
     path_to_scene_file = os.path.join(
         data_path, "scene_datasets/habitat-test-scenes/apartment_1.glb"
     )
+
     sim = Simulator(
-        path_to_scene_file=path_to_scene_file, image_height=256, image_width=256
+        # path_to_scene_file=path_to_scene_file,
+        path_to_scene_file="/home/alko/ese6500/active-gaussian-splatting/data/versioned_data/habitat_test_scenes/apartment_1.glb",
+        image_height=256,
+        image_width=256,
     )
 
     rgbd = sim.collect_image_data(True)
