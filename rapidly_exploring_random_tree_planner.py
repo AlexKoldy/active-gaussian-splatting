@@ -195,9 +195,9 @@ class RapidlyExploringRandomTreePlanner:
         # of samples allowed and while the newest node is not
         # close enough to the goal
         while len(tree) <= self.max_samples:
-            self.step(root_node, tree, None)
+            self.step(root_node, tree)
             if self.is_close_to_goal(tree[-1], goal_point):
-                goal_node = TreeNode(x=goal_point[0], y=goal_point[2])
+                goal_node = TreeNode(x=goal_point[0], y=goal_point[1])
                 goal_node.set_parent(tree[-1])
                 tree.append(goal_node)
                 print("RRT converged")
@@ -214,7 +214,10 @@ class RapidlyExploringRandomTreePlanner:
             path_arr[0, i] = node.x
             path_arr[1, i] = node.y
 
-        path_arr = np.vstack((path_arr[0], np.zeros(self.k), path_arr[1]))
+        # path_arr = path_arr
+
+        length = path_arr.shape[1]
+        path_arr = np.vstack((path_arr[0], np.zeros(length), path_arr[1]))
         return path_arr.T
         # import matplotlib.pyplot as plt
 

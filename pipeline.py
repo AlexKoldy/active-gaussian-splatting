@@ -632,10 +632,7 @@ class ActiveGaussSplatMapper:
         rendered_image.backward(gradient=torch.ones_like(rendered_image))
         # print(self.model_params[0].data)
         # print(self.model_params[0].grad)
-        # exit()
-        current_hessian = torch.cat(
-            [p.grad.detach().reshape(-1) for p in self.model_params]
-        )
+        current_hessian = torch.cat([p.grad.reshape(-1) for p in self.model_params])
 
         current_hessian = current_hessian * current_hessian + self.reg_lam
 
@@ -644,10 +641,12 @@ class ActiveGaussSplatMapper:
     def info_gain(self, traj):
         gain = 0
         H_sum = torch.zeros_like(self.running_hessian)
+        traj = torch.tensor(traj)
         for pose in traj:
             cam = get_camera(pose, self.train_dataset.K.cpu()).to(
                 self.train_dataset.device
             )
+            # ERROR HERE
             cam = to_viewpoint_camera(cam)
             H = self.hessian_approx(cam)
             pose_gain = torch.sum(H * torch.reciprocal(self.running_hessian))
@@ -686,7 +685,7 @@ class ActiveGaussSplatMapper:
             print("planning step: " + str(step))
             step += 1
 
-            print("sampling trajectory from: " + str(current_state))
+            # print("sampling trajectory from: " + str(current_state))
 
             # xyz_state = np.copy(current_state[:3])
             # xyz_state[1] = current_state[2]
@@ -700,7 +699,7 @@ class ActiveGaussSplatMapper:
 
             # Sample end points using current model's Gaussian locations
             num_samples = 10
-            xyzs = self.gaussModel.get_xyz()  # Nx3
+            xyzs = self.gaussModel.get_xyz  # Nx3
             sample_end_points = xyzs[
                 np.random.choice(len(xyzs), num_samples, replace=False)
             ]
@@ -734,7 +733,7 @@ class ActiveGaussSplatMapper:
                 rrt = RapidlyExploringRandomTreePlanner(
                     self.gaussModel,
                     move_distance=0.25,  # how far to move in direction of sampled point
-                    k=1,  # number of Gaussians
+                    k=2,  # number of Gaussians
                     z=0.0,  # height of planning [m]
                     num_points_to_check=10,  # number of points to check for collision
                     cost_collision_thresh=100.0,  # cost threshold on whether or not there is a collision based off total sampled cost across the lin
@@ -748,14 +747,13 @@ class ActiveGaussSplatMapper:
                     ),  # bounds in 2D space for sampling
                 )
 
-                traj_xyz = rrt.plan(
-                    current_state, sample_end_points[i]
-                )  # output of RRT
+                goal_point = sample_end_points[i][::2].clone().detach().cpu().numpy()
+                traj_xyz = rrt.plan(current_state, goal_point)  # output of RRT
                 # Number of rows in the original array
                 num_points_in_traj = traj_xyz.shape[0]
                 zero_cols = np.zeros((num_points_in_traj, 3))
                 traj_full = np.hstack((traj_xyz, zero_cols))
-                current_yaw = current_state[3:]
+                current_yaw = current_state[3]
                 goal_yaw = yaws[i]
                 if goal_yaw < current_yaw:
                     goal_yaw += 2 * np.pi
@@ -769,10 +767,10 @@ class ActiveGaussSplatMapper:
             gains = []
             H_sums = []
             for traj in copy_traj:
-                info_gain, H_sum = info_gain(
+                info_gain_val, H_sum = self.info_gain(
                     traj
                 )  # TODO information gain function(traj) goes here, use mean info gain
-                gains.append(info_gain)
+                gains.append(info_gain_val)
                 H_sums.append(H_sum)
 
             best_index = np.argmax(np.array(gains))
@@ -826,7 +824,7 @@ class ActiveGaussSplatMapper:
         self.model_params = (
             self.gaussModel._xyz,
             self.gaussModel._features_dc,
-            self.gaussModel._features_rest,
+            # self.gaussModel._features_rest,
             self.gaussModel._scaling,
             self.gaussModel._rotation,
             self.gaussModel._opacity,
