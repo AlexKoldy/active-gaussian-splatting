@@ -19,7 +19,7 @@ from scipy.spatial.transform import Rotation as R
 import matplotlib
 from skimage import color, io
 
-from habitat_sim.utils.common import d3_40_colors_rgb
+# from habitat_sim.utils.common import d3_40_colors_rgb
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -41,13 +41,16 @@ from gaussian_splatting.gauss_model import GaussModel
 from gaussian_splatting.gauss_render import GaussRenderer
 from habitat_to_data import Dataset
 import contextlib
-from torch.profiler import profile, ProfilerActivity
+
+# from torch.profiler import profile, ProfilerActivity
 import gaussian_splatting.utils as utils
 
 
 # habitat simulator
 sys.path.append("simulator")
-from sim import HabitatSim
+from simulator import HabitatSim
+
+from rapidly_exploring_random_tree_planner import RapidlyExploringRandomTreePlanner
 
 import yaml
 
@@ -77,66 +80,79 @@ def parse_args():
     )
     return parser.parse_args()
 
+
 class GSSTrainer(Trainer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.data = kwargs.get('data')
-        self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
+        self.data = kwargs.get("data")
+        self.gaussRender = GaussRenderer(**kwargs.get("render_kwargs", {}))
         self.lambda_dssim = 0.2
         self.lambda_depth = 0.0
         self.USE_GPU_PYTORCH = True
-        self.USE_PROFILE = False
+        # self.USE_PROFILE = False
 
     def on_train_step(self):
-        ind = np.random.choice(len(self.data['camera']))
-        camera = self.data['camera'][ind]
-        rgb = self.data['rgb'][ind]
-        depth = self.data['depth'][ind]
-        mask = (self.data['alpha'][ind] > 0.5)
+        ind = np.random.choice(len(self.data["camera"]))
+        camera = self.data["camera"][ind]
+        rgb = self.data["rgb"][ind]
+        depth = self.data["depth"][ind]
+        mask = self.data["alpha"][ind] > 0.5
         if self.USE_GPU_PYTORCH:
             camera = to_viewpoint_camera(camera)
 
-        if self.USE_PROFILE:
-            prof = profile(activities=[ProfilerActivity.CUDA], with_stack=True)
-        else:
-            prof = contextlib.nullcontext()
+        # if self.USE_PROFILE:
+        #     prof = profile(activities=[ProfilerActivity.CUDA], with_stack=True)
+        # else:
+        prof = contextlib.nullcontext()
 
         with prof:
             out = self.gaussRender(pc=self.model, camera=camera)
 
         if self.USE_PROFILE:
-            print(prof.key_averages(group_by_stack_n=True).table(sort_by='self_cuda_time_total', row_limit=20))
+            print(
+                prof.key_averages(group_by_stack_n=True).table(
+                    sort_by="self_cuda_time_total", row_limit=20
+                )
+            )
 
+        l1_loss = loss_utils.l1_loss(out["render"], rgb)
+        depth_loss = loss_utils.l1_loss(out["depth"][..., 0][mask], depth[mask])
+        ssim_loss = 1.0 - loss_utils.ssim(out["render"], rgb)
 
-        l1_loss = loss_utils.l1_loss(out['render'], rgb)
-        depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
-        ssim_loss = 1.0-loss_utils.ssim(out['render'], rgb)
-
-        total_loss = (1-self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
-        #psnr = utils.img2psnr(out['render'], rgb)
-        log_dict = {'total': total_loss,'l1':l1_loss, 'ssim': ssim_loss, 'depth': depth_loss}#, 'psnr': psnr}
+        total_loss = (
+            (1 - self.lambda_dssim) * l1_loss
+            + self.lambda_dssim * ssim_loss
+            + depth_loss * self.lambda_depth
+        )
+        # psnr = utils.img2psnr(out['render'], rgb)
+        log_dict = {
+            "total": total_loss,
+            "l1": l1_loss,
+            "ssim": ssim_loss,
+            "depth": depth_loss,
+        }  # , 'psnr': psnr}
 
         return total_loss, log_dict
 
     def on_evaluate_step(self, **kwargs):
         import matplotlib.pyplot as plt
-        ind = np.random.choice(len(self.data['camera']))
-        camera = self.data['camera'][ind]
+
+        ind = np.random.choice(len(self.data["camera"]))
+        camera = self.data["camera"][ind]
         if self.USE_GPU_PYTORCH:
             camera = to_viewpoint_camera(camera)
 
-        rgb = self.data['rgb'][ind].detach().cpu().numpy()
+        rgb = self.data["rgb"][ind].detach().cpu().numpy()
         out = self.gaussRender(pc=self.model, camera=camera)
-        rgb_pd = out['render'].detach().cpu().numpy()
-        depth_pd = out['depth'].detach().cpu().numpy()[..., 0]
-        depth = self.data['depth'][ind].detach().cpu().numpy()
+        rgb_pd = out["render"].detach().cpu().numpy()
+        depth_pd = out["depth"].detach().cpu().numpy()[..., 0]
+        depth = self.data["depth"][ind].detach().cpu().numpy()
         depth = np.concatenate([depth, depth_pd], axis=1)
-        depth = (1 - depth / depth.max())
-        depth = plt.get_cmap('jet')(depth)[..., :3]
+        depth = 1 - depth / depth.max()
+        depth = plt.get_cmap("jet")(depth)[..., :3]
         image = np.concatenate([rgb, rgb_pd], axis=1)
         image = np.concatenate([image, depth], axis=0)
-        utils.imwrite(str(self.results_folder / f'image-{self.step}.png'), image)
-
+        utils.imwrite(str(self.results_folder / f"image-{self.step}.png"), image)
 
 
 class ActiveGaussSplatMapper:
@@ -160,7 +176,6 @@ class ActiveGaussSplatMapper:
             self.config_file["aabb"], device=self.config_file["cuda"]
         )
 
-
         self.train_dataset = None
         self.test_dataset = None
 
@@ -168,7 +183,6 @@ class ActiveGaussSplatMapper:
 
         self.sim_step = 0
         self.viz_save_path = self.save_path + "/viz/"
-
 
         self.gaussModel = GaussModel(debug=False)
 
@@ -223,13 +237,16 @@ class ActiveGaussSplatMapper:
 
         self.running_hessian = None
 
+        self.quad_traj = []
+
         self.model_params = (
-        self.gaussModel._xyz,
-        self.gaussModel._features_dc,
-        self.gaussModel._features_rest,
-        self.gaussModel._scaling,
-        self.gaussModel._rotation,
-        self.gaussModel._opacity)
+            self.gaussModel._xyz,
+            self.gaussModel._features_dc,
+            self.gaussModel._features_rest,
+            self.gaussModel._scaling,
+            self.gaussModel._rotation,
+            self.gaussModel._opacity,
+        )
 
         self.reg_lam = 1e-6
 
@@ -347,9 +364,7 @@ class ActiveGaussSplatMapper:
 
         print("Initialization Finished")
 
-    
-    def gauss_training(
-        self, steps, final_train=False, initial_train=False):
+    def gauss_training(self, steps, final_train=False, initial_train=False):
         print("3D Gaussian Model Training Started")
 
         # if final_train:
@@ -414,41 +429,45 @@ class ActiveGaussSplatMapper:
             # if model_idx == 0
             # else self.config_file["cuda"]
         )
-        device = 'cuda'
+        device = "cuda"
         # radiance_field.train()
         # estimator.train()
 
-        
         trainset = self.train_dataset
         data = {}
-        data['rgb'] = trainset.images / 255.0 # Check this line???
-        data['depth'] = trainset.depths
-        data['depth_range'] = torch.Tensor([[0,6]]*trainset.size).to(device)
-        data['alpha'] = torch.ones(trainset.depths.shape).to(device)
+        data["rgb"] = trainset.images / 255.0  # Check this line???
+        data["depth"] = trainset.depths
+        data["depth_range"] = torch.Tensor([[0, 6]] * trainset.size).to(device)
+        data["alpha"] = torch.ones(trainset.depths.shape).to(device)
 
-        data['camera'] = get_camera(trainset.camtoworlds.cpu(), trainset.K.cpu()).to(device)
+        data["camera"] = get_camera(trainset.camtoworlds.cpu(), trainset.K.cpu()).to(
+            device
+        )
         # print(data['camera'].shape)
         if initial_train:
-            points = get_point_clouds(data['camera'], trainset.depths, 
-                                    torch.ones(trainset.depths.shape).to(device), 
-                                    trainset.images / 255.0)
+            points = get_point_clouds(
+                data["camera"],
+                trainset.depths,
+                torch.ones(trainset.depths.shape).to(device),
+                trainset.images / 255.0,
+            )
             raw_points = points.random_sample(2**12)
             self.gaussModel.create_from_pcd(pcd=raw_points)
-        render_kwargs = {'white_bkgd': True}
-        trainer = GSSTrainer(model=self.gaussModel, 
+        render_kwargs = {"white_bkgd": True}
+        trainer = GSSTrainer(
+            model=self.gaussModel,
             data=data,
-            train_batch_size=1, 
+            train_batch_size=1,
             train_num_steps=steps,
-            i_image =100,
-            train_lr=1e-3, 
+            i_image=100,
+            train_lr=1e-3,
             amp=False,
             fp16=False,
-            results_folder='result/train',
+            results_folder="result/train",
             render_kwargs=render_kwargs,
         )
         # trainer.on_evaluate_step()
         trainer.train()
-        
 
         # ## Save checkpoit for video
         # if (step + 1) % 1000 == 0:
@@ -610,10 +629,12 @@ class ActiveGaussSplatMapper:
 
     def hessian_approx(self, camera):
         out = self.gaussRender(pc=self.gaussModel, camera=camera)
-        rendered_image = out['render']
+        rendered_image = out["render"]
         rendered_image.backward(gradient=torch.ones_like(rendered_image))
 
-        current_hessian = torch.cat([p.grad.detach().reshape(-1) for p in self.model_params])
+        current_hessian = torch.cat(
+            [p.grad.detach().reshape(-1) for p in self.model_params]
+        )
 
         current_hessian = current_hessian * current_hessian + self.reg_lam
 
@@ -623,15 +644,17 @@ class ActiveGaussSplatMapper:
         gain = 0
         H_sum = torch.zeros_like(self.running_hessian)
         for pose in traj:
-            cam = get_camera(pose, self.train_dataset.K.cpu()).to(self.train_dataset.device)
+            cam = get_camera(pose, self.train_dataset.K.cpu()).to(
+                self.train_dataset.device
+            )
             cam = to_viewpoint_camera(cam)
             H = self.hessian_approx(cam)
             pose_gain = torch.sum(H * torch.reciprocal(self.running_hessian))
             H_sum += H
             gain += pose_gain
-        average_gain = gain/len(traj)
+        average_gain = gain / len(traj)
         return average_gain, H_sum
-        
+
     def planning(self, training_steps_per_step):
         print("Planning Thread Started")
 
@@ -643,16 +666,19 @@ class ActiveGaussSplatMapper:
         flag = True
 
         first_camtoworld = self.train_dataset.camtoworlds[0]
-        first_camera = get_camera(first_camtoworld.cpu(), self.train_dataset.K.cpu()).to(self.train_dataset.device)
+        first_camera = get_camera(
+            first_camtoworld.cpu(), self.train_dataset.K.cpu()
+        ).to(self.train_dataset.device)
         first_camera = to_viewpoint_camera(first_camera)
         self.running_hessian = self.hessian_approx(first_camera)
 
         for camtoworld in self.train_dataset.camtoworlds[1:]:
-            camera = get_camera(camtoworld.cpu(), self.train_dataset.K.cpu()).to(self.train_dataset.device)
+            camera = get_camera(camtoworld.cpu(), self.train_dataset.K.cpu()).to(
+                self.train_dataset.device
+            )
             camera = to_viewpoint_camera(camera)
             self.running_hessian += self.hessian_approx(camera)
-        
-        self.quad_traj = []
+
         self.quad_traj.append(current_state)
 
         while flag and step < self.planning_step:
@@ -661,9 +687,9 @@ class ActiveGaussSplatMapper:
 
             print("sampling trajectory from: " + str(current_state))
 
-            xyz_state = np.copy(current_state[:3])
-            xyz_state[1] = current_state[2]
-            xyz_state[2] = current_state[1]
+            # xyz_state = np.copy(current_state[:3])
+            # xyz_state[1] = current_state[2]
+            # xyz_state[2] = current_state[1]
 
             aabb = np.copy(self.aabb.cpu().numpy())
             aabb[1] = self.aabb[2]
@@ -671,20 +697,20 @@ class ActiveGaussSplatMapper:
             aabb[4] = self.aabb[5]
             aabb[5] = self.aabb[4]
 
-
             # Sample end points using current model's Gaussian locations
             num_samples = 10
-            xyzs = self.gaussModel.get_xyz() # Nx3
-            sample_end_points = xyzs[np.random.choice(len(xyzs), num_samples, replace=False)]
+            xyzs = self.gaussModel.get_xyz()  # Nx3
+            sample_end_points = xyzs[
+                np.random.choice(len(xyzs), num_samples, replace=False)
+            ]
             sample_end_points[:, 1] = 0
             yaws = np.pi * 2 * np.random.rand(10)
 
-
             ## Replace part below with RRT
-            # sampled trajectories is nested list of "shape" (N, M, 3) -> N num trajs, 
+            # sampled trajectories is nested list of "shape" (N, M, 3) -> N num trajs,
             # M length of each traj (this will not be standard across trajs), 3 is xyz
 
-            #TODO
+            # TODO
 
             # N_sample_traj_pose = sample_traj(
             #     voxel_grid=np.array([vg, vg1]),
@@ -701,11 +727,31 @@ class ActiveGaussSplatMapper:
 
             # RRT will return one trajectory (list of points R3) for a start and end position
             # Here we will loop over ths function for all sampled points, and interpolate yaw angle orientation
-            N_sample_traj_pose = None #output of RRT fcn
+            N_sample_traj_pose = None  # output of RRT fcn
             full_trajs = []
             for i in range(num_samples):
-                traj_xyz = function_here(current_state, sample_end_points[i], self.gaussModel) #output of RRT
-                num_points_in_traj = traj_xyz.shape[0]  # Number of rows in the original array
+                rrt = RapidlyExploringRandomTreePlanner(
+                    self.gaussModel,
+                    move_distance=0.25,  # how far to move in direction of sampled point
+                    k=1,  # number of Gaussians
+                    z=0.0,  # height of planning [m]
+                    num_points_to_check=10,  # number of points to check for collision
+                    cost_collision_thresh=100.0,  # cost threshold on whether or not there is a collision based off total sampled cost across the lin
+                    max_samples=1000,  # maximum number of times to try sampling a new node
+                    goal_tresh=0.3,  # distance from node to goal point to be considered converged
+                    bounds=np.array(
+                        [
+                            [-3.0, 3.0],
+                            [-3.0, 3.0],
+                        ]
+                    ),  # bounds in 2D space for sampling
+                )
+
+                traj_xyz = rrt.plan(
+                    current_state, sample_end_points[i]
+                )  # output of RRT
+                # Number of rows in the original array
+                num_points_in_traj = traj_xyz.shape[0]
                 zero_cols = np.zeros((num_points_in_traj, 3))
                 traj_full = np.hstack((traj_xyz, zero_cols))
                 current_yaw = current_state[3:]
@@ -714,16 +760,17 @@ class ActiveGaussSplatMapper:
                     goal_yaw += 2 * np.pi
                 traj_yaws = np.linspace(current_yaw, goal_yaw, num=num_points_in_traj)
                 for j in range(num_points_in_traj):
-                    traj_full[j][4] = traj_yaws[j] % (2*np.pi)
+                    traj_full[j][4] = traj_yaws[j] % (2 * np.pi)
                 full_trajs.append(traj_full)
-                
 
             copy_traj = full_trajs.copy()
 
             gains = []
             H_sums = []
             for traj in copy_traj:
-                info_gain, H_sum = info_gain(traj) #TODO information gain function(traj) goes here, use mean info gain
+                info_gain, H_sum = info_gain(
+                    traj
+                )  # TODO information gain function(traj) goes here, use mean info gain
                 gains.append(info_gain)
                 H_sums.append(H_sum)
 
@@ -731,7 +778,9 @@ class ActiveGaussSplatMapper:
 
             self.running_hessian += H_sums[best_index]
 
-            sampled_images, sampled_depths = self.sim.render_images_from_poses(copy_traj[best_index])
+            sampled_images, sampled_depths = self.sim.render_images_from_poses(
+                copy_traj[best_index]
+            )
 
             self.current_pose = copy_traj[best_index][-1]
 
@@ -745,11 +794,8 @@ class ActiveGaussSplatMapper:
                 sampled_poses_mat.append(T)
 
             self.train_dataset.update_data(
-                sampled_images,
-                sampled_depths,
-                sampled_poses_mat
+                sampled_images, sampled_depths, sampled_poses_mat
             )
-
 
             print("plan finished at: " + str(current_state))
 
@@ -776,14 +822,9 @@ class ActiveGaussSplatMapper:
         self.gauss_training(self.config_file["training_steps"])
         # self.gaussModel.create_from_pcd(pcd=raw_points)
 
+        self.planning(int(self.config_file["training_steps"]))
 
-        self.planning(
-            int(self.config_file["training_steps"])
-        )
-
-        self.gauss_training(
-            self.config_file["training_steps"] * 5, final_train=True
-        )
+        self.gauss_training(self.config_file["training_steps"] * 5, final_train=True)
 
         # plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
         # plt.savefig(self.save_path + "/learning_rate.png")
