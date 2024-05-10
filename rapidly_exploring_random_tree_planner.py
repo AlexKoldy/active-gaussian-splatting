@@ -159,11 +159,14 @@ class RapidlyExploringRandomTreePlanner:
 
         # Check if there is a collision based on the Gaussian cost
         # Note that we do this check in 3D space
-        if not self.check_collision(
-            np.array([root_node.x, self.z, root_node.y]),
-            np.array([new_node.x, self.z, new_node.y]),
-        ):
-            tree.append(new_node)
+        # if not self.check_collision(
+        #     np.array([root_node.x, self.z, root_node.y]),
+        #     np.array([new_node.x, self.z, new_node.y]),
+        # ):
+        #     new_node.set_parent(nearest_node)
+        #     tree.append(new_node)
+
+        # TODO COMMENT OUT
         new_node.set_parent(nearest_node)
         tree.append(new_node)
 

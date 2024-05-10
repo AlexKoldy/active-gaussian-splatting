@@ -240,16 +240,9 @@ class ActiveGaussSplatMapper:
 
         self.quad_traj = []
 
-        self.model_params = (
-            self.gaussModel._xyz,
-            self.gaussModel._features_dc,
-            self.gaussModel._features_rest,
-            self.gaussModel._scaling,
-            self.gaussModel._rotation,
-            self.gaussModel._opacity,
-        )
-
         self.reg_lam = 1e-6
+
+        self.model_params = None
 
         print("Parameters Loaded")
 
@@ -631,8 +624,15 @@ class ActiveGaussSplatMapper:
     def hessian_approx(self, camera):
         out = self.gaussRender(pc=self.gaussModel, camera=camera)
         rendered_image = out["render"]
+        # plt.figure()
+        # plt.imshow(rendered_image.detach().cpu().numpy())
+        # plt.imshow(np.ones((256, 256)))/
+        # plt.scatter(0, 0)
+        # plt.savefig("testing_image")
         rendered_image.backward(gradient=torch.ones_like(rendered_image))
-
+        # print(self.model_params[0].data)
+        # print(self.model_params[0].grad)
+        # exit()
         current_hessian = torch.cat(
             [p.grad.detach().reshape(-1) for p in self.model_params]
         )
@@ -823,7 +823,16 @@ class ActiveGaussSplatMapper:
         self.gauss_training(self.config_file["training_steps"], initial_train=True)
         # self.gaussModel.create_from_pcd(pcd=raw_points)
 
-        plan = False
+        self.model_params = (
+            self.gaussModel._xyz,
+            self.gaussModel._features_dc,
+            self.gaussModel._features_rest,
+            self.gaussModel._scaling,
+            self.gaussModel._rotation,
+            self.gaussModel._opacity,
+        )
+
+        plan = True
 
         if plan:
 
@@ -850,9 +859,9 @@ class ActiveGaussSplatMapper:
         if not os.path.exists(self.save_path + "/checkpoints/"):
             os.makedirs(self.save_path + "/checkpoints/")
 
-        self.gaussModel.save_ply(
-            self.save_path + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        )
+        # self.gaussModel.save_ply(
+        #     self.save_path + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        # )
 
         # self.trajector_uncertainty_list = np.array(self.trajector_uncertainty_list)
         # np.save(self.save_path + "/uncertainty.npy", self.trajector_uncertainty_list)
