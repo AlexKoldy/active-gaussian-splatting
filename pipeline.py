@@ -31,19 +31,6 @@ import torch.nn.functional as F
 from lpips import LPIPS
 import cv2
 
-# sys.path.append("perception/nerfacc")
-# from nerfacc.estimators.occ_grid import OccGridEstimator
-
-# nerfacc
-# sys.path.append("perception/models")
-# from datasets.utils import Rays
-# from utils import (
-#     render_image_with_occgrid,
-#     render_image_with_occgrid_test,
-#     render_image_with_occgrid_with_depth_guide,
-#     render_probablistic_image_with_occgrid_test,
-# )
-# from radiance_fields.ngp import NGPRadianceField
 
 from gaussian_splatting.trainer import Trainer
 import gaussian_splatting.utils.loss_utils as loss_utils
@@ -57,30 +44,22 @@ import contextlib
 from torch.profiler import profile, ProfilerActivity
 import gaussian_splatting.utils as utils
 
-# rotorpy
-sys.path.append("planning/rotorpy")
-sys.path.append("planning")
-from planning_funcs import *
 
 # habitat simulator
 sys.path.append("simulator")
 from sim import HabitatSim
-
-# data processing
-sys.path.append("perception/data_proc")
-from habitat_to_data import Dataset
 
 import yaml
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--sem-num",
-        type=int,
-        default=0,
-        help="number of semantics classes",
-    )
+    # parser.add_argument(
+    #     "--sem-num",
+    #     type=int,
+    #     default=0,
+    #     help="number of semantics classes",
+    # )
     parser.add_argument(
         "--habitat-scene",
         type=str,
@@ -199,30 +178,30 @@ class ActiveGaussSplatMapper:
         # self.lpips_net = LPIPS(net="vgg").to(self.config_file["cuda"])
         # self.lpips_norm_fn = lambda x: x[None, ...].permute(0, 3, 1, 2) * 2 - 1
 
-        self.focal = (
-            0.5 * self.config_file["img_w"] / np.tan(self.config_file["hfov"] / 2)
-        )
+        # self.focal = (
+        #     0.5 * self.config_file["img_w"] / np.tan(self.config_file["hfov"] / 2)
+        # )
 
-        # Unsure if this cmap stuff is necessary
-        cmap = plt.cm.tab20
-        cmaplist = [cmap(i) for i in range(cmap.N)]
-        cmap1 = plt.cm.tab20b
-        cmaplist1 = [cmap1(i) for i in range(cmap1.N)]
+        # # Unsure if this cmap stuff is necessary
+        # cmap = plt.cm.tab20
+        # cmaplist = [cmap(i) for i in range(cmap.N)]
+        # cmap1 = plt.cm.tab20b
+        # cmaplist1 = [cmap1(i) for i in range(cmap1.N)]
 
-        cmaplist = (
-            cmaplist
-            + [cmaplist1[0]]
-            + [cmaplist1[1]]
-            + [cmaplist1[4]]
-            + [cmaplist1[5]]
-            + [cmaplist1[8]]
-            + [cmaplist1[9]]
-            + [cmaplist1[12]]
-            + [cmaplist1[13]]
-            + [cmaplist1[16]]
-            + [cmaplist1[17]]
-        )
-        self.custom_cmap = matplotlib.colors.ListedColormap(cmaplist)
+        # cmaplist = (
+        #     cmaplist
+        #     + [cmaplist1[0]]
+        #     + [cmaplist1[1]]
+        #     + [cmaplist1[4]]
+        #     + [cmaplist1[5]]
+        #     + [cmaplist1[8]]
+        #     + [cmaplist1[9]]
+        #     + [cmaplist1[12]]
+        #     + [cmaplist1[13]]
+        #     + [cmaplist1[16]]
+        #     + [cmaplist1[17]]
+        # )
+        # self.custom_cmap = matplotlib.colors.ListedColormap(cmaplist)
 
         r = np.arctan(np.linspace(0.5, 319.5, 320) / 320).tolist()
         r.reverse()
@@ -327,44 +306,44 @@ class ActiveGaussSplatMapper:
             sampled_poses_mat,
         )
 
-        test_loc = self.config_file["test_loc"]
+        # test_loc = self.config_file["test_loc"]
 
-        test_quat = self.config_file["test_quat"]
+        # test_quat = self.config_file["test_quat"]
 
-        test_samples = []
+        # test_samples = []
 
-        for loc in test_loc:
-            for quat in test_quat:
-                test_samples.append(np.array(loc + quat))
+        # for loc in test_loc:
+        #     for quat in test_quat:
+        #         test_samples.append(np.array(loc + quat))
 
-        test_sampled_poses_mat = []
-        for p in test_samples:
-            T = np.eye(4)
-            T[:3, :3] = R.from_quat(p[3:]).as_matrix()
-            T[:3, 3] = p[:3]
-            test_sampled_poses_mat.append(T)
+        # test_sampled_poses_mat = []
+        # for p in test_samples:
+        #     T = np.eye(4)
+        #     T[:3, :3] = R.from_quat(p[3:]).as_matrix()
+        #     T[:3, 3] = p[:3]
+        #     test_sampled_poses_mat.append(T)
 
-        (
-            test_sampled_images,
-            test_sampled_depth_images,
-            # test_sampled_sem_images,
-        ) = self.sim.sample_images_from_poses(test_samples)
+        # (
+        #     test_sampled_images,
+        #     test_sampled_depth_images,
+        #     # test_sampled_sem_images,
+        # ) = self.sim.sample_images_from_poses(test_samples)
 
-        test_sampled_images = test_sampled_images[:, :, :, :3]
+        # test_sampled_images = test_sampled_images[:, :, :, :3]
 
-        self.test_dataset = Dataset(
-            training=False,
-            save_fp=self.save_path + "/test/",
-            # num_models=self.config_file["n_ensembles"],
-            device=self.config_file["cuda"],
-        )
+        # self.test_dataset = Dataset(
+        #     training=False,
+        #     save_fp=self.save_path + "/test/",
+        #     # num_models=self.config_file["n_ensembles"],
+        #     device=self.config_file["cuda"],
+        # )
 
-        self.test_dataset.update_data(
-            test_sampled_images,
-            test_sampled_depth_images,
-            # test_sampled_sem_images,
-            np.array(test_sampled_poses_mat),
-        )
+        # self.test_dataset.update_data(
+        #     test_sampled_images,
+        #     test_sampled_depth_images,
+        #     # test_sampled_sem_images,
+        #     np.array(test_sampled_poses_mat),
+        # )
 
         print("Initialization Finished")
 
@@ -385,8 +364,8 @@ class ActiveGaussSplatMapper:
         #             )
         #         )
 
-        num_test_images = self.test_dataset.size
-        test_idx = np.arange(num_test_images)
+        # num_test_images = self.test_dataset.size
+        # test_idx = np.arange(num_test_images)
 
         # self.sem_ce_ls = []
 
@@ -464,7 +443,7 @@ class ActiveGaussSplatMapper:
             train_lr=1e-3, 
             amp=False,
             fp16=False,
-            results_folder='result/test',
+            results_folder='result/train',
             render_kwargs=render_kwargs,
         )
         # trainer.on_evaluate_step()
@@ -672,6 +651,9 @@ class ActiveGaussSplatMapper:
             camera = get_camera(camtoworld.cpu(), self.train_dataset.K.cpu()).to(self.train_dataset.device)
             camera = to_viewpoint_camera(camera)
             self.running_hessian += self.hessian_approx(camera)
+        
+        self.quad_traj = []
+        self.quad_traj.append(current_state)
 
         while flag and step < self.planning_step:
             print("planning step: " + str(step))
@@ -694,6 +676,7 @@ class ActiveGaussSplatMapper:
             num_samples = 10
             xyzs = self.gaussModel.get_xyz() # Nx3
             sample_end_points = xyzs[np.random.choice(len(xyzs), num_samples, replace=False)]
+            sample_end_points[:, 1] = 0
             yaws = np.pi * 2 * np.random.rand(10)
 
 
@@ -752,6 +735,8 @@ class ActiveGaussSplatMapper:
 
             self.current_pose = copy_traj[best_index][-1]
 
+            self.quad_traj.append(self.current_pose)
+
             sampled_poses_mat = []
             for pose in copy_traj[best_index]:
                 T = np.eye(4)
@@ -800,42 +785,44 @@ class ActiveGaussSplatMapper:
             self.config_file["training_steps"] * 5, final_train=True
         )
 
-        plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
-        plt.savefig(self.save_path + "/learning_rate.png")
+        # plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
+        # plt.savefig(self.save_path + "/learning_rate.png")
 
-        plt.yscale("log")
-        plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
-        plt.savefig(self.save_path + "/learning_rate_log.png")
+        # plt.yscale("log")
+        # plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
+        # plt.savefig(self.save_path + "/learning_rate_log.png")
 
         # save radiance field, estimator, and optimzer
         print("Saving Models")
         # save_model(radiance_field, estimator, "test")
 
         self.train_dataset.save()
-        self.test_dataset.save()
+        # self.test_dataset.save()
 
         if not os.path.exists(self.save_path + "/checkpoints/"):
             os.makedirs(self.save_path + "/checkpoints/")
 
-        self.trajector_uncertainty_list = np.array(self.trajector_uncertainty_list)
-        np.save(self.save_path + "/uncertainty.npy", self.trajector_uncertainty_list)
+        self.gaussModel.save_ply(self.save_path)
 
-        self.errors_hist = np.array(self.errors_hist)
-        np.save(self.save_path + "/errors.npy", self.errors_hist)
+        # self.trajector_uncertainty_list = np.array(self.trajector_uncertainty_list)
+        # np.save(self.save_path + "/uncertainty.npy", self.trajector_uncertainty_list)
 
-        for i, (radiance_field, estimator, optimizer, scheduler) in enumerate(
-            zip(self.radiance_fields, self.estimators, self.optimizers, self.schedulers)
-        ):
-            checkpoint_path = (
-                self.save_path + "/checkpoints/" + "model_" + str(i) + ".pth"
-            )
-            save_dict = {
-                "occ_grid": estimator.binaries,
-                "model": radiance_field.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-            }
-            torch.save(save_dict, checkpoint_path)
-            print("Saved checkpoints at", checkpoint_path)
+        # self.errors_hist = np.array(self.errors_hist)
+        # np.save(self.save_path + "/errors.npy", self.errors_hist)
+
+        # for i, (radiance_field, estimator, optimizer, scheduler) in enumerate(
+        #     zip(self.radiance_fields, self.estimators, self.optimizers, self.schedulers)
+        # ):
+        #     checkpoint_path = (
+        #         self.save_path + "/checkpoints/" + "model_" + str(i) + ".pth"
+        #     )
+        #     save_dict = {
+        #         "occ_grid": estimator.binaries,
+        #         "model": radiance_field.state_dict(),
+        #         "optimizer_state_dict": optimizer.state_dict(),
+        #     }
+        #     torch.save(save_dict, checkpoint_path)
+        #     print("Saved checkpoints at", checkpoint_path)
 
 
 if __name__ == "__main__":
