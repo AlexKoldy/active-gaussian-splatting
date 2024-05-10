@@ -168,8 +168,8 @@ class Trainer(object):
                 self.step += 1
                 if accelerator.is_main_process:
                     
-                    if (self.step % self.i_image == 0):
-                        self.on_evaluate_step()
+                    # if (self.step % self.i_image == 0):
+                    #     self.on_evaluate_step()
 
                     if self.step !=0 and (self.step % self.i_save == 0):
                         milestone = self.step // self.i_save

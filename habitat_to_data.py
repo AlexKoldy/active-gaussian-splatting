@@ -314,7 +314,7 @@ class Dataset(torch.utils.data.Dataset):
 
     #     return Rays(origins=origins, viewdirs=viewdirs)
 
-    def render_image_from_pose(
+    def render_images_from_poses(
             model,
             poses,
             width,
