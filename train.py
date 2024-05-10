@@ -107,7 +107,7 @@ if __name__ == "__main__":
 
 
     # points = get_point_clouds(data['camera'], data['depth'], data['alpha'], data['rgb'])
-    raw_points = points.random_sample(2**13)
+    raw_points = points.random_sample(2**5)
     # raw_points.write_ply(open('points.ply', 'wb'))
 
     gaussModel = GaussModel(debug=False)
@@ -120,7 +120,7 @@ if __name__ == "__main__":
     trainer = GSSTrainer(model=gaussModel, 
         data=data,
         train_batch_size=1, 
-        train_num_steps=2000,
+        train_num_steps=200,
         i_image =100,
         train_lr=1e-3, 
         amp=False,
@@ -128,5 +128,8 @@ if __name__ == "__main__":
         results_folder='result/test',
         render_kwargs=render_kwargs,
     )
+    print('cov')
+    print(gaussModel.get_covariance().shape)
     trainer.on_evaluate_step()
     trainer.train()
+    gaussModel.save_ply('.')
