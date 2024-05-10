@@ -101,9 +101,9 @@ class Simulator:
             (np.ndarray): RGB, depth values as numpy array of shape (height, width, 4)
         """
         
-        # move quad out of scene so it doesn't show up in the images
-        quad_state = self.get_quad_state()
-        self.set_agent_state(position=np.array([0.0, 0.0, 0.0]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
+        # # move quad out of scene so it doesn't show up in the images
+        # quad_state = self.get_quad_state()
+        # self.set_agent_state(position=np.array([0.0, 0.0, 0.0]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
         
         # Get RGBA data from the color camera
         rgba = self.sim.get_sensor_observations(0)["color_sensor"]
@@ -119,10 +119,37 @@ class Simulator:
             plt.show()
 
         # move quad back to original position
-        self.set_quad_state(quad_state)
+        # self.set_quad_state(quad_state)
 
         # Concatenate the data and return it. The alpha value is not returned
         return np.concatenate((rgba[:, :, :-1], np.expand_dims(depth, axis=2)), axis=2)
+    
+    def sample_images_from_poses(self, poses):
+        """
+        sample images from list of poses
+
+        Args:
+            poses: list of numpy arrays of pose (x, y, z, qx, qy, qz, qw)
+
+        Returns:
+            list of images
+        """
+        # move quad out of scene so it doesn't show up in the images
+        quad_state = self.agent.get_state()
+
+        rgbs = []
+        depths = []
+        for pose in poses:
+            self.set_agent_state(pose)
+            rgbd = self.collect_image_data()
+            # rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+            rgbs.append(rgbd[:, :, :-1])
+            depths.append(rgbd[:, :, -1])
+        
+
+        # move quad back to original position
+        self.set_agent_state(quad_state)
+        return np.array(rgbs), np.array(depths)
 
 
 if __name__ == "__main__":
