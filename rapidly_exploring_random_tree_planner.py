@@ -77,10 +77,15 @@ class RapidlyExploringRandomTreePlanner:
         # represented as a vector of size 6 holding the upper triangle of the
         # symmetric 3x3 covariance matrix Ensure the xyz positions of the Gaussian
         # models is of shape (3, N)
-        mus = self.gaussModel.get_xyz().T  # Positions of shape (3, N)
-        Sigmas = self.gaussModel.get_covariance()  # Covariances of shape (N, 6)
+        mus = (
+            self.gaussModel.get_xyz.T.detach().cpu().numpy()
+        )  # Positions of shape (3, N)
+        Sigmas = (
+            self.gaussModel.get_covariance().detach().cpu().numpy()
+        )  # Covariances of shape (N, 6)
 
         # Calculate distances
+        point = np.expand_dims(point, axis=1)
         distances = np.linalg.norm(mus - point, axis=1)
 
         # Sort distances and get indices of k smallest ones
@@ -93,6 +98,8 @@ class RapidlyExploringRandomTreePlanner:
         self, mu: np.ndarray, Sigma: np.ndarray, point: np.ndarray
     ) -> float:
         """"""
+        point = np.array(point)
+        mu = np.array(mu)
         return (
             (2 * np.pi) ** (-3 / 2)
             * np.linalg.det(Sigma) ** (-1 / 2)
@@ -100,7 +107,7 @@ class RapidlyExploringRandomTreePlanner:
         )
 
     def generate_symmetric_covariance_from_upper_triangle(
-        upper_triangle: np.ndarray,
+        self, upper_triangle: np.ndarray
     ) -> np.ndarray:
         """"""
         # Initialize a symmetric matrix
@@ -123,7 +130,8 @@ class RapidlyExploringRandomTreePlanner:
         local_path = np.vstack(
             (
                 np.linspace(start_point[0], end_point[0], self.num_points_to_check),
-                np.linspace(start_point[1], end_point[1], self.num_points_to_check),
+                np.zeros(self.num_points_to_check),
+                np.linspace(start_point[2], end_point[2], self.num_points_to_check),
             )
         )
 
@@ -138,7 +146,11 @@ class RapidlyExploringRandomTreePlanner:
             # Transpose 'mus' so we take the rows, i.e., positions of the Gaussians
             for mu, Sigma in zip(mus.T, Sigmas):
                 # Add cost based off Gaussian
-                cost += self.evaluate_gaussian_at_point(mu, Sigma, point)
+                cost += self.evaluate_gaussian_at_point(
+                    mu,
+                    self.generate_symmetric_covariance_from_upper_triangle(Sigma),
+                    point,
+                )
 
             # Check if the cost exceeds the threshold in the look to return early if needed
             if cost >= self.cost_collision_thresh:
@@ -159,16 +171,18 @@ class RapidlyExploringRandomTreePlanner:
 
         # Check if there is a collision based on the Gaussian cost
         # Note that we do this check in 3D space
-        # if not self.check_collision(
-        #     np.array([root_node.x, self.z, root_node.y]),
-        #     np.array([new_node.x, self.z, new_node.y]),
-        # ):
-        #     new_node.set_parent(nearest_node)
-        #     tree.append(new_node)
+        if not self.check_collision(
+            np.array([root_node.x, self.z, root_node.y]),
+            np.array([new_node.x, self.z, new_node.y]),
+        ):
+            new_node.set_parent(nearest_node)
+            tree.append(new_node)
+        else:
+            print("Collision detected!")
 
         # TODO COMMENT OUT
-        new_node.set_parent(nearest_node)
-        tree.append(new_node)
+        # new_node.set_parent(nearest_node)
+        # tree.append(new_node)
 
     def is_close_to_goal(self, node: TreeNode, goal_point: np.ndarray) -> bool:
         """ """
@@ -207,7 +221,7 @@ class RapidlyExploringRandomTreePlanner:
         path = [tree[-1]]
         while path[0] != tree[0]:
             path.insert(0, path[0].parent)
-        path.reverse()
+        # path.reverse()
 
         path_arr = np.zeros((2, len(path)))
         for i, node in enumerate(path):

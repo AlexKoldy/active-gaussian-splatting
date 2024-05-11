@@ -244,6 +244,8 @@ class ActiveGaussSplatMapper:
 
         self.model_params = None
 
+        self.device = "cuda"
+
         print("Parameters Loaded")
 
     def initialization(self):
@@ -257,10 +259,12 @@ class ActiveGaussSplatMapper:
             angles = r.as_euler("zyx", degrees=True)
             angles[1] = (angles[1] + 9 * i) % 360
             pose = g_pose.copy()
+            self.quad_traj.append(np.concatenate((pose[:3], angles)))
             pose[3:] = R.from_euler("zyx", angles, degrees=True).as_quat()
 
             # Maybe we keep this noise addition??
             pose[:3] = pose[:3] + np.random.uniform([-0.2, -0.2, -0.2], [0.2, 0.2, 0.2])
+
             sampled_poses_quat.append(pose)
 
             T = np.eye(4)
@@ -445,7 +449,7 @@ class ActiveGaussSplatMapper:
                 torch.ones(trainset.depths.shape).to(device),
                 trainset.images / 255.0,
             )
-            raw_points = points.random_sample(2**14)
+            raw_points = points.random_sample(2**12)
             self.gaussModel.create_from_pcd(pcd=raw_points)
         render_kwargs = {"white_bkgd": True}
         trainer = GSSTrainer(
@@ -635,34 +639,68 @@ class ActiveGaussSplatMapper:
         current_hessian = torch.cat([p.grad.reshape(-1) for p in self.model_params])
 
         current_hessian = current_hessian * current_hessian + self.reg_lam
+        del out, rendered_image
+        torch.cuda.empty_cache()
 
         return current_hessian
 
     def info_gain(self, traj):
         gain = 0
-        H_sum = torch.zeros_like(self.running_hessian)
+        H_sum = torch.zeros_like(self.running_hessian).cpu()
         for pose in traj:
 
             T = np.eye(4)
             T[:3, :3] = R.from_euler("zyx", pose[3:]).as_matrix()
             T[:3, 3] = pose[:3]
-            T = torch.tensor(T)
-            cam = get_camera(T, self.train_dataset.K.cpu()).to(
+            # sample_dataset = Dataset(
+            #     training=True,
+            #     save_fp=self.save_path + "/train/",
+            #     device=self.config_file["cuda"],
+            # )
+
+            # sample_dataset.update_data(
+            #     None,
+            #     None,
+            #     np.array(traj),
+            # )
+            # info_gain_val, H_sum = self.info_gain(
+            #     sample_dataset.camtoworlds
+            # )
+            T = torch.from_numpy(T).to(torch.float32).to(self.train_dataset.device)
+            print(T)
+            cam = get_camera(T.cpu(), self.train_dataset.K.cpu()).to(
                 self.train_dataset.device
             )
             # ERROR HERE
             cam = to_viewpoint_camera(cam)
             H = self.hessian_approx(cam)
             pose_gain = torch.sum(H * torch.reciprocal(self.running_hessian))
-            H_sum += H
+            H_sum += H.cpu()
             gain += pose_gain
+            del H, pose_gain, T
+            torch.cuda.empty_cache()
         average_gain = gain / len(traj)
+        del gain
+        torch.cuda.empty_cache()
         return average_gain, H_sum
+
+    def vis_traj(self, traj, num):
+        points = np.array(self.quad_traj)[:, :3]
+        plt.figure()
+        plt.scatter(traj[:, 0], traj[:, 2], label="rrt path")
+        plt.scatter(points[:, 0], points[:, 2], label="traveled path")
+        plt.scatter(traj[0, 0], traj[0, 2], label="start point")
+        plt.scatter(traj[-1, 0], traj[-1, 2], label="goal point")
+        plt.legend()
+
+        plt.savefig(self.save_path + "/traj" + str(num) + ".png")
 
     def planning(self, training_steps_per_step):
         print("Planning Thread Started")
-
-        current_state = self.global_origin
+        last_point = self.train_dataset.camtoworlds[-1].cpu().numpy()
+        self.current_pose = np.zeros(6)
+        self.current_pose[:3] = last_point[:3, 3]
+        self.current_pose[3:] = R.from_matrix(last_point[:3, :3]).as_euler("zyx")
 
         sim_step = 0
 
@@ -683,7 +721,7 @@ class ActiveGaussSplatMapper:
             camera = to_viewpoint_camera(camera)
             self.running_hessian += self.hessian_approx(camera)
 
-        self.quad_traj.append(current_state)
+        self.quad_traj.append(self.current_pose)
 
         while flag and step < self.planning_step:
             print("planning step: " + str(step))
@@ -702,32 +740,13 @@ class ActiveGaussSplatMapper:
             # aabb[5] = self.aabb[4]
 
             # Sample end points using current model's Gaussian locations
-            num_samples = 10
+            num_samples = 5
             xyzs = self.gaussModel.get_xyz  # Nx3
             sample_end_points = xyzs[
                 np.random.choice(len(xyzs), num_samples, replace=False)
             ]
             sample_end_points[:, 1] = 0
             yaws = np.pi * 2 * np.random.rand(10)
-
-            ## Replace part below with RRT
-            # sampled trajectories is nested list of "shape" (N, M, 3) -> N num trajs,
-            # M length of each traj (this will not be standard across trajs), 3 is xyz
-
-            # TODO
-
-            # N_sample_traj_pose = sample_traj(
-            #     voxel_grid=np.array([vg, vg1]),
-            #     current_state=xyz_state,
-            #     N_traj=self.config_file["num_traj"],
-            #     aabb=aabb,
-            #     sim=self.sim,
-            #     cost_map=self.cost_map,
-            #     N_sample_disc=self.config_file["sample_disc"],
-            #     voxel_grid_size=self.config_file["main_grid_size"],
-            #     visiting_map=self.visiting_map,
-            #     save_path=self.save_path,
-            # )
 
             # RRT will return one trajectory (list of points R3) for a start and end position
             # Here we will loop over ths function for all sampled points, and interpolate yaw angle orientation
@@ -751,12 +770,12 @@ class ActiveGaussSplatMapper:
                 )
 
                 goal_point = sample_end_points[i][::2].clone().detach().cpu().numpy()
-                traj_xyz = rrt.plan(current_state, goal_point)  # output of RRT
+                traj_xyz = rrt.plan(self.current_pose, goal_point)  # output of RRT
                 # Number of rows in the original array
                 num_points_in_traj = traj_xyz.shape[0]
                 zero_cols = np.zeros((num_points_in_traj, 3))
                 traj_full = np.hstack((traj_xyz, zero_cols))
-                current_yaw = current_state[4]
+                current_yaw = self.current_pose[4]
                 goal_yaw = yaws[i]
                 if goal_yaw < current_yaw:
                     goal_yaw += 2 * np.pi
@@ -769,28 +788,30 @@ class ActiveGaussSplatMapper:
 
             gains = []
             H_sums = []
+            num = 1
             for traj in copy_traj:
+                self.vis_traj(traj, num)
+                num += 1
                 info_gain_val, H_sum = self.info_gain(
                     traj
                 )  # TODO information gain function(traj) goes here, use mean info gainyaw
                 H_sums.append(H_sum)
-                gains.append(info_gain_val)
+                gains.append(info_gain_val.cpu())
             best_index = np.argmax(np.array(gains))
 
-            self.running_hessian += H_sums[best_index]
+            self.running_hessian += H_sums[best_index].to(self.device)
 
-            sampled_images, sampled_depths = self.sim.render_images_from_poses(
+            sampled_images, sampled_depths = self.sim.sample_images_from_poses(
                 copy_traj[best_index]
             )
 
             self.current_pose = copy_traj[best_index][-1]
 
-            self.quad_traj.append(self.current_pose)
-
             sampled_poses_mat = []
             for pose in copy_traj[best_index]:
+                self.quad_traj.append(pose)
                 T = np.eye(4)
-                T[:3, :3] = R.from_quat(pose[3:]).as_matrix()
+                T[:3, :3] = R.from_euler("zyx", pose[3:]).as_matrix()
                 T[:3, 3] = pose[:3]
                 sampled_poses_mat.append(T)
 
@@ -798,7 +819,7 @@ class ActiveGaussSplatMapper:
                 sampled_images, sampled_depths, sampled_poses_mat
             )
 
-            print("plan finished at: " + str(current_state))
+            print("plan finished at: " + str(self.current_pose))
 
             self.gauss_training(steps=training_steps_per_step)
 

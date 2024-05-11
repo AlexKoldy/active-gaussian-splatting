@@ -141,8 +141,12 @@ class Simulator:
         rgbs = []
         depths = []
         for pose in poses:
-            orientation = R.from_matrix(pose[:3, :3]).as_quat()
-            position = pose[:3, 3]
+            if pose.ndim < 2:
+                orientation = R.from_euler("zyx", pose[3:]).as_quat()
+                position = pose[:3]
+            else:
+                orientation = R.from_matrix(pose[:3, :3]).as_quat()
+                position = pose[:3, 3]
             self.set_agent_state(position, orientation)
             rgbd = self.collect_image_data()
             # rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
