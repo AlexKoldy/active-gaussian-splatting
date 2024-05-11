@@ -641,9 +641,13 @@ class ActiveGaussSplatMapper:
     def info_gain(self, traj):
         gain = 0
         H_sum = torch.zeros_like(self.running_hessian)
-        traj = torch.tensor(traj)
         for pose in traj:
-            cam = get_camera(pose, self.train_dataset.K.cpu()).to(
+
+            T = np.eye(4)
+            T[:3, :3] = R.from_euler("zyx", pose[3:]).as_matrix()
+            T[:3, 3] = pose[:3]
+            T = torch.tensor(T)
+            cam = get_camera(T, self.train_dataset.K.cpu()).to(
                 self.train_dataset.device
             )
             # ERROR HERE
@@ -727,7 +731,6 @@ class ActiveGaussSplatMapper:
 
             # RRT will return one trajectory (list of points R3) for a start and end position
             # Here we will loop over ths function for all sampled points, and interpolate yaw angle orientation
-            N_sample_traj_pose = None  # output of RRT fcn
             full_trajs = []
             for i in range(num_samples):
                 rrt = RapidlyExploringRandomTreePlanner(
@@ -753,7 +756,7 @@ class ActiveGaussSplatMapper:
                 num_points_in_traj = traj_xyz.shape[0]
                 zero_cols = np.zeros((num_points_in_traj, 3))
                 traj_full = np.hstack((traj_xyz, zero_cols))
-                current_yaw = current_state[3]
+                current_yaw = current_state[4]
                 goal_yaw = yaws[i]
                 if goal_yaw < current_yaw:
                     goal_yaw += 2 * np.pi
@@ -769,10 +772,9 @@ class ActiveGaussSplatMapper:
             for traj in copy_traj:
                 info_gain_val, H_sum = self.info_gain(
                     traj
-                )  # TODO information gain function(traj) goes here, use mean info gain
-                gains.append(info_gain_val)
+                )  # TODO information gain function(traj) goes here, use mean info gainyaw
                 H_sums.append(H_sum)
-
+                gains.append(info_gain_val)
             best_index = np.argmax(np.array(gains))
 
             self.running_hessian += H_sums[best_index]
