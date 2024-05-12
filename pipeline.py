@@ -254,10 +254,10 @@ class ActiveGaussSplatMapper:
         sampled_poses_mat = []
         r = R.from_quat(self.global_origin[3:])
         g_pose = self.global_origin.copy()
-        initial_sample = 39
+        initial_sample = 60
         for i in range(initial_sample):
             angles = r.as_euler("zyx", degrees=True)
-            angles[1] = (angles[1] + 9 * i) % 360
+            angles[1] = (angles[1] + 12 * i) % 360
             pose = g_pose.copy()
             self.quad_traj.append(np.concatenate((pose[:3], angles)))
             pose[3:] = R.from_euler("zyx", angles, degrees=True).as_quat()
@@ -449,15 +449,15 @@ class ActiveGaussSplatMapper:
                 torch.ones(trainset.depths.shape).to(device),
                 trainset.images / 255.0,
             )
-            raw_points = points.random_sample(2**12)
+            raw_points = points.random_sample(2**14)
             self.gaussModel.create_from_pcd(pcd=raw_points)
         render_kwargs = {"white_bkgd": True}
         trainer = GSSTrainer(
             model=self.gaussModel,
             data=data,
             train_batch_size=1,
-            train_num_steps=steps / 100,
-            i_image=100,
+            train_num_steps=steps,
+            i_image=200,
             train_lr=1e-3,
             amp=False,
             fp16=False,
@@ -667,7 +667,7 @@ class ActiveGaussSplatMapper:
             #     sample_dataset.camtoworlds
             # )
             T = torch.from_numpy(T).to(torch.float32).to(self.train_dataset.device)
-            print(T)
+            # print(T)
             cam = get_camera(T.cpu(), self.train_dataset.K.cpu()).to(
                 self.train_dataset.device
             )
@@ -687,13 +687,19 @@ class ActiveGaussSplatMapper:
     def vis_traj(self, traj, num):
         points = np.array(self.quad_traj)[:, :3]
         plt.figure()
-        plt.scatter(traj[:, 0], traj[:, 2], label="rrt path")
-        plt.scatter(points[:, 0], points[:, 2], label="traveled path")
-        plt.scatter(traj[0, 0], traj[0, 2], label="start point")
-        plt.scatter(traj[-1, 0], traj[-1, 2], label="goal point")
+        gaussians = self.gaussModel.get_xyz.T.detach().cpu().numpy()
+        gaussians = (gaussians.T)[np.abs(gaussians[1]) < 0.25]
+        plt.scatter(gaussians[:, 0], gaussians[:, 2], c="black", label="gaussians")
+        plt.plot(traj[:, 0], traj[:, 2], c="blue", label="rrt path")
+        plt.scatter(traj[:, 0], traj[:, 2], c="blue", label="rrt path")
+        plt.plot(points[:, 0], points[:, 2], c="orange", label="traveled path")
+        plt.scatter(points[:, 0], points[:, 2], c="orange", label="traveled path")
+        plt.scatter(traj[0, 0], traj[0, 2], c="green", label="start point")
+        plt.scatter(traj[-1, 0], traj[-1, 2], c="red", label="goal point")
         plt.legend()
 
         plt.savefig(self.save_path + "/traj" + str(num) + ".png")
+        plt.close()
 
     def planning(self, training_steps_per_step):
         print("Planning Thread Started")
@@ -746,7 +752,7 @@ class ActiveGaussSplatMapper:
                 np.random.choice(len(xyzs), num_samples, replace=False)
             ]
             sample_end_points[:, 1] = 0
-            yaws = np.pi * 2 * np.random.rand(10)
+            yaws = np.pi * 2 * np.random.rand(num_samples)
 
             # RRT will return one trajectory (list of points R3) for a start and end position
             # Here we will loop over ths function for all sampled points, and interpolate yaw angle orientation
@@ -843,6 +849,7 @@ class ActiveGaussSplatMapper:
         # Train initial model with this data
         self.gauss_training(self.config_file["training_steps"], initial_train=True)
         # self.gaussModel.create_from_pcd(pcd=raw_points)
+        exit()
 
         self.model_params = (
             self.gaussModel._xyz,

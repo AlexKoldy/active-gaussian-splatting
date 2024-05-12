@@ -175,8 +175,14 @@ class RapidlyExploringRandomTreePlanner:
             np.array([root_node.x, self.z, root_node.y]),
             np.array([new_node.x, self.z, new_node.y]),
         ):
-            new_node.set_parent(nearest_node)
-            tree.append(new_node)
+            if (
+                np.isinf(new_node.get_position()).any()
+                or np.isnan(new_node.get_position()).any()
+            ):
+                print("NaN or Inf detected!")
+            else:
+                new_node.set_parent(nearest_node)
+                tree.append(new_node)
         else:
             print("Collision detected!")
 

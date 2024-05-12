@@ -117,7 +117,9 @@ class Simulator:
             rgb_img = Image.fromarray(rgba, mode="RGBA")
             plt.figure()
             plt.imshow(rgb_img)
-            plt.show()
+            # plt.show()
+            plt.savefig("test.png")
+            plt.close()
 
         # move quad back to original position
         # self.set_quad_state(quad_state)
@@ -157,13 +159,24 @@ class Simulator:
         # self.set_agent_state(quad_state)
         return np.array(rgbs), np.array(depths)
 
+    # convert 3d points to 2d topdown coordinates
+    def convert_points_to_topdown(self, points, meters_per_pixel):
+        points_topdown = []
+        bounds = self.sim.pathfinder.get_bounds()
+        for point in points:
+            # convert 3D x,z to topdown x,y
+            px = (point[0] - bounds[0][0]) / meters_per_pixel
+            py = (point[2] - bounds[0][2]) / meters_per_pixel
+            points_topdown.append(np.array([px, py]))
+        return np.array(points_topdown).T
+
 
 if __name__ == "__main__":
     import os
 
     data_path = os.path.join(os.getcwd(), "data")
     path_to_scene_file = os.path.join(
-        data_path, "scene_datasets/habitat-test-scenes/apartment_1.glb"
+        data_path, "versioned_data/habitat_test_scenes/apartment_1.glb"
     )
 
     sim = Simulator(
@@ -172,5 +185,42 @@ if __name__ == "__main__":
         image_height=256,
         image_width=256,
     )
+    # https://github.com/facebookresearch/habitat-sim/blob/main/examples/tutorials/notebooks/ECCV_2020_Navigation.ipynb
+    sim.sim.pathfinder.load_nav_mesh(
+        os.path.join(
+            data_path,
+            "/home/alko/ese6500/active-gaussian-splatting/data/versioned_data/habitat_test_scenes/apartment_1.navmesh",
+        )
+    )
+    height = sim.sim.pathfinder.get_bounds()[0][1]
+    # height = 0
 
+    map = sim.sim.pathfinder.get_topdown_view(0.1, height)
+    print(sim.sim.pathfinder.is_loaded)
+
+    waypoints = np.array([[0, 0, 0], [0, 0, 1]])
+
+    points = sim.convert_points_to_topdown(waypoints, 0.1)
+
+    # print(map)
+    # map = np.ones((256, 256))
+
+    # print(type(map))
+    # plt.figure()
+    # plt.imshow(map)
+    import matplotlib
+
+    matplotlib.use("agg")
+    import matplotlib.pyplot as plt
+
+    plt.figure()
+    plt.scatter(points[0, 0], points[1, 0])
+    plt.plot(points[0, :], points[1, :])
+    plt.imshow(map)
+    plt.savefig("TOPDOWN.png")
+    plt.close()
+
+    quat = np.array([0, -0.7068252, 0, 0.7068252])
+
+    sim.set_agent_state(np.array([2.0, 0, 0]), quat / np.linalg.norm(quat))
     rgbd = sim.collect_image_data(True)
