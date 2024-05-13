@@ -4,6 +4,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import habitat_sim
 from scipy.spatial.transform import Rotation as R
+import os
 
 
 class Simulator:
@@ -35,6 +36,10 @@ class Simulator:
         config = self.make_simple_config(settings)
         self.sim = habitat_sim.Simulator(config)
         self.agent = self.sim.initialize_agent(settings["default_agent"])
+
+        # self.sim.pathfinder.load_nav_mesh(
+        #     "/home/alko/ese6500/active-gaussian-splatting/data/versioned_data/habitat_test_scenes/apartment_1.navmesh",
+        # )
 
     def make_simple_config(
         self, settings: Dict[str, Union[str, float, int]]
@@ -186,16 +191,11 @@ if __name__ == "__main__":
         image_width=256,
     )
     # https://github.com/facebookresearch/habitat-sim/blob/main/examples/tutorials/notebooks/ECCV_2020_Navigation.ipynb
-    sim.sim.pathfinder.load_nav_mesh(
-        os.path.join(
-            data_path,
-            "/home/alko/ese6500/active-gaussian-splatting/data/versioned_data/habitat_test_scenes/apartment_1.navmesh",
-        )
-    )
+
     height = sim.sim.pathfinder.get_bounds()[0][1]
     # height = 0
 
-    map = sim.sim.pathfinder.get_topdown_view(0.1, height)
+    map = sim.sim.pathfinder.get_topdown_view(0.01, height)
     print(sim.sim.pathfinder.is_loaded)
 
     waypoints = np.array([[0, 0, 0], [0, 0, 1]])
