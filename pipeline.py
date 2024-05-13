@@ -134,8 +134,8 @@ class GSSTrainer(Trainer):
             "depth": depth_loss,
         }  # , 'psnr': psnr}
 
-        del out, l1_loss, depth_loss, ssim_loss, camera, rgb, depth, mask
-        torch.cuda.empty_cache()
+        # del out, l1_loss, depth_loss, ssim_loss, camera, rgb, depth, mask
+        # torch.cuda.empty_cache()
 
         return total_loss, log_dict
 
@@ -467,8 +467,8 @@ class ActiveGaussSplatMapper:
                 results_folder="result",
                 render_kwargs=render_kwargs,
             )
-            del points
-            torch.cuda.empty_cache()
+            # del points
+            # torch.cuda.empty_cache()
         else:
             render_kwargs = {"white_bkgd": True}
             trainer = GSSTrainer(
@@ -483,8 +483,8 @@ class ActiveGaussSplatMapper:
                 results_folder="result",
                 render_kwargs=render_kwargs,
             )
-        del trainset, data
-        torch.cuda.empty_cache()
+        # del trainset, data
+        # torch.cuda.empty_cache()
         # trainer.on_evaluate_step()
         trainer.train()
 
@@ -659,10 +659,28 @@ class ActiveGaussSplatMapper:
         # print(self.model_params[0].data)
         # print(self.model_params[0].grad)
         current_hessian = torch.cat([p.grad.reshape(-1) for p in self.model_params])
+        print("nan in H: ", torch.isnan(current_hessian).any().item())
+        if torch.isnan(current_hessian).any().item():
+            # print("nan in H: ", torch.isnan(current_hessian).any().item())
+            # plt.figure()
+            # plt.imshow(rendered_image.detach().cpu().numpy())
+            # plt.savefig("testing_image")
+            # plt.close()
+            print(
+                torch.sum(torch.isnan(current_hessian)).item(),
+                " / ",
+                current_hessian.shape[0],
+            )
+        # exit()
+        current_hessian = (
+            torch.nan_to_num(current_hessian * current_hessian) + self.reg_lam
+        )
+        # del out, rendered_image, ones
+        # torch.cuda.empty_cache()
 
-        current_hessian = current_hessian * current_hessian + self.reg_lam
-        del out, rendered_image, ones
-        torch.cuda.empty_cache()
+        for param in self.model_params:
+            if param.grad is not None:
+                param.grad.zero_()
 
         return current_hessian
 
@@ -670,6 +688,7 @@ class ActiveGaussSplatMapper:
 
         gain = 0
         H_sum = torch.zeros_like(self.running_hessian).cpu()
+        # print(gain)
         for pose in traj:
 
             T = np.eye(4)
@@ -697,14 +716,16 @@ class ActiveGaussSplatMapper:
             # ERROR HERE
             cam = to_viewpoint_camera(cam)
             H = self.hessian_approx(cam)
+            # print("nan in H: ", torch.isnan(H).any())
             pose_gain = torch.sum(H * torch.reciprocal(self.running_hessian))
             H_sum += H.cpu()
             gain += pose_gain
-            del H, pose_gain, T, cam
-            torch.cuda.empty_cache()
+            # del H, pose_gain, T, cam
+            # torch.cuda.empty_cache()
         average_gain = gain / len(traj)
-        del gain
-        torch.cuda.empty_cache()
+        print(average_gain)
+        # del gain
+        # torch.cuda.empty_cache()
         return average_gain, H_sum
 
     def vis_traj(self, trajs, inds, num=0):
@@ -868,7 +889,7 @@ class ActiveGaussSplatMapper:
             # if step == 5:
             best_sort_inds = (np.argsort(np.array(gains))[::-1])[:5]
             print(best_sort_inds)
-            print(gains)
+            # print(gains)
             self.vis_traj(copy_traj, best_sort_inds, num=step)
 
             self.running_hessian += H_sums[best_index].to(self.device)
@@ -891,8 +912,8 @@ class ActiveGaussSplatMapper:
                 sampled_images, sampled_depths, sampled_poses_mat
             )
 
-            del sampled_images, sampled_depths, sampled_poses_mat
-            torch.cuda.empty_cache()
+            # del sampled_images, sampled_depths, sampled_poses_mat
+            # torch.cuda.empty_cache()
 
             print("plan finished at: " + str(self.current_pose))
 
@@ -998,9 +1019,9 @@ class ActiveGaussSplatMapper:
 if __name__ == "__main__":
     args = parse_args()
 
-    random.seed(9)
-    np.random.seed(9)
-    torch.manual_seed(9)
+    # random.seed(9)
+    # np.random.seed(9)
+    # torch.manual_seed(9)
 
     mapper = ActiveGaussSplatMapper(args)
     mapper.pipeline()
