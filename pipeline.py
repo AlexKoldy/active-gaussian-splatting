@@ -707,9 +707,8 @@ class ActiveGaussSplatMapper:
         torch.cuda.empty_cache()
         return average_gain, H_sum
 
-    def vis_traj(self, trajs):
+    def vis_traj(self, trajs, inds, num=0):
         points = np.array(self.quad_traj)[:, :3]
-        matplotlib.use("agg")
         plt.figure()
         # gaussians = self.gaussModel.get_xyz.T.detach().cpu().numpy()
         # gaussians = (gaussians.T)[np.abs(gaussians[1]) < 0.25]
@@ -720,30 +719,31 @@ class ActiveGaussSplatMapper:
         # map = self.sim.sim.pathfinder.get_topdown_view(meters_per_pix, height)
         # plt.imshow(map)
         colors = ["blue", "yellow", "green", "red", "purple"]
-        for i, traj in enumerate(trajs):
+        count = 0
+        for ind in inds:
             # traj_points = self.sim.convert_points_to_topdown(
             #     traj[:, :3], meters_per_pix
             # )
-            traj_points = traj
+            traj_points = trajs[ind]
             plt.plot(
                 traj_points[:, 0],
-                traj_points[:, 1],
-                c=colors[i],
-                label="RRT Path " + str(i + 1),
+                traj_points[:, 2],
+                c=colors[count],
             )
             plt.scatter(
                 traj_points[:, 0],
-                traj_points[:, 1],
-                c=colors[i],
-                label="RRT Path " + str(i + 1),
+                traj_points[:, 2],
+                c=colors[count],
+                label="RRT Path " + str(count + 1),
             )
+            count += 1
             # plt.scatter(traj[0, 0], traj[0, 2], c="green", label="start point")
             # plt.scatter(traj[-1, 0], traj[-1, 2], c="red", label="goal point")
         plt.plot(points[:, 0], points[:, 2], c="orange", label="Traveled Path")
         plt.scatter(points[:, 0], points[:, 2], c="orange", label="Traveled Path")
 
         plt.legend()
-        plt.savefig(self.save_path + "/traj.png")
+        plt.savefig(self.save_path + "/traj" + str(num) + ".png")
         plt.close()
 
     def planning(self, training_steps_per_step):
@@ -810,7 +810,7 @@ class ActiveGaussSplatMapper:
             for i in range(num_samples):
                 rrt = RapidlyExploringRandomTreePlanner(
                     self.gaussModel,
-                    move_distance=0.25,  # how far to move in direction of sampled point
+                    move_distance=0.5,  # how far to move in direction of sampled point
                     k=2,  # number of Gaussians
                     z=0.0,  # height of planning [m]
                     num_points_to_check=10,  # number of points to check for collision
@@ -847,27 +847,29 @@ class ActiveGaussSplatMapper:
                 H_sums.append(H_sum)
                 gains.append(info_gain_val.cpu())
 
-                del info_gain_val, traj
-                torch.cuda.empty_cache()
+                # del info_gain_val, traj
+                # torch.cuda.empty_cache()
 
-                print(
-                    "torch.cuda.memory_allocated: %fGB"
-                    % (torch.cuda.memory_allocated(0) / 1024 / 1024 / 1024)
-                )
-                print(
-                    "torch.cuda.memory_reserved: %fGB"
-                    % (torch.cuda.memory_reserved(0) / 1024 / 1024 / 1024)
-                )
-                print(
-                    "torch.cuda.max_memory_reserved: %fGB"
-                    % (torch.cuda.max_memory_reserved(0) / 1024 / 1024 / 1024)
-                )
+                # print(
+                #     "torch.cuda.memory_allocated: %fGB"
+                #     % (torch.cuda.memory_allocated(0) / 1024 / 1024 / 1024)
+                # )
+                # print(
+                #     "torch.cuda.memory_reserved: %fGB"
+                #     % (torch.cuda.memory_reserved(0) / 1024 / 1024 / 1024)
+                # )
+                # print(
+                #     "torch.cuda.max_memory_reserved: %fGB"
+                #     % (torch.cuda.max_memory_reserved(0) / 1024 / 1024 / 1024)
+                # )
 
             best_index = np.argmax(np.array(gains))
             print(copy_traj[best_index].shape)
-            if step == 5:
-                best_sort_inds = (np.argsort(gains)[::-1])[:5]
-                self.vis_traj(copy_traj[best_sort_inds])
+            # if step == 5:
+            best_sort_inds = (np.argsort(np.array(gains))[::-1])[:5]
+            print(best_sort_inds)
+            print(gains)
+            self.vis_traj(copy_traj, best_sort_inds, num=step)
 
             self.running_hessian += H_sums[best_index].to(self.device)
 
@@ -894,18 +896,18 @@ class ActiveGaussSplatMapper:
 
             print("plan finished at: " + str(self.current_pose))
 
-            print(
-                "torch.cuda.memory_allocated: %fGB"
-                % (torch.cuda.memory_allocated(0) / 1024 / 1024 / 1024)
-            )
-            print(
-                "torch.cuda.memory_reserved: %fGB"
-                % (torch.cuda.memory_reserved(0) / 1024 / 1024 / 1024)
-            )
-            print(
-                "torch.cuda.max_memory_reserved: %fGB"
-                % (torch.cuda.max_memory_reserved(0) / 1024 / 1024 / 1024)
-            )
+            # print(
+            #     "torch.cuda.memory_allocated: %fGB"
+            #     % (torch.cuda.memory_allocated(0) / 1024 / 1024 / 1024)
+            # )
+            # print(
+            #     "torch.cuda.memory_reserved: %fGB"
+            #     % (torch.cuda.memory_reserved(0) / 1024 / 1024 / 1024)
+            # )
+            # print(
+            #     "torch.cuda.max_memory_reserved: %fGB"
+            #     % (torch.cuda.max_memory_reserved(0) / 1024 / 1024 / 1024)
+            # )
 
             self.gauss_training(steps=training_steps_per_step)
 
