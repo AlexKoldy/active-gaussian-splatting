@@ -1,3 +1,7 @@
+"""
+Adapted from 2024 Pratik Chaudhari, UPenn.
+"""
+
 from typing import Dict, Union
 import numpy as np
 from PIL import Image
@@ -5,6 +9,7 @@ import matplotlib.pyplot as plt
 import habitat_sim
 from scipy.spatial.transform import Rotation as R
 import os
+import pickle
 
 
 class Simulator:
@@ -191,6 +196,9 @@ if __name__ == "__main__":
         image_width=256,
     )
     # https://github.com/facebookresearch/habitat-sim/blob/main/examples/tutorials/notebooks/ECCV_2020_Navigation.ipynb
+    sim.sim.pathfinder.load_nav_mesh(
+        "/home/alko/ese6500/active-gaussian-splatting/data/versioned_data/habitat_test_scenes/apartment_1.navmesh",
+    )
 
     height = sim.sim.pathfinder.get_bounds()[0][1]
     # height = 0
@@ -198,29 +206,58 @@ if __name__ == "__main__":
     map = sim.sim.pathfinder.get_topdown_view(0.01, height)
     print(sim.sim.pathfinder.is_loaded)
 
-    waypoints = np.array([[0, 0, 0], [0, 0, 1]])
+    with open("./data/habitat_collection/mat2.pkl", "rb") as f:
+        data = pickle.load(f)
+        prev_traj = data[-1]
+        rrts = data[:-1]
+        waypoints = prev_traj
 
-    points = sim.convert_points_to_topdown(waypoints, 0.1)
+        points = sim.convert_points_to_topdown(waypoints, 0.01)
 
-    # print(map)
-    # map = np.ones((256, 256))
+        # print(map)
+        # map = np.ones((256, 256))
 
-    # print(type(map))
-    # plt.figure()
-    # plt.imshow(map)
-    import matplotlib
+        # print(type(map))
+        # plt.figure()
+        # plt.imshow(map)
+        import matplotlib
 
-    matplotlib.use("agg")
-    import matplotlib.pyplot as plt
+        matplotlib.use("agg")
+        import matplotlib.pyplot as plt
 
-    plt.figure()
-    plt.scatter(points[0, 0], points[1, 0])
-    plt.plot(points[0, :], points[1, :])
-    plt.imshow(map)
-    plt.savefig("TOPDOWN.png")
-    plt.close()
-
-    quat = np.array([0, -0.7068252, 0, 0.7068252])
-
-    sim.set_agent_state(np.array([2.0, 0, 0]), quat / np.linalg.norm(quat))
-    rgbd = sim.collect_image_data(True)
+        # plt.figure()
+        # plt.scatter(points[0, 0], points[1, 0])
+        # plt.plot(points[0, :], points[1, :])
+        MAP = "jet"
+        NPOINTS = len(points[0])
+        heatmap = False
+        if heatmap:
+            cm = plt.get_cmap(MAP)
+            colors = cm(np.linspace(0, 1, NPOINTS - 1, endpoint=False))
+            for i in range(NPOINTS - 1):
+                if i == NPOINTS - 2:
+                    plt.plot(
+                        points[0, i : i + 2],
+                        points[1, i : i + 2],
+                        c=colors[i],
+                    )
+                plt.plot(points[0, i : i + 2], points[1, i : i + 2], c=colors[i])
+            plt.imshow(map)
+            plt.gca().invert_yaxis()
+            plt.legend(bbox_to_anchor=(1.5, 1.05))
+            plt.savefig("heatmap.png")
+            plt.close()
+        else:
+            plt.plot(points[0, :], points[1, :], c="orange", label="Traveled Path")
+            colors = ["blue", "pink", "green", "black", "purple"]
+            for i in range(len(rrts)):
+                waypoints = rrts[i][:, :3]
+                pts = sim.convert_points_to_topdown(waypoints, 0.01)
+                plt.plot(
+                    pts[0, :], pts[1, :], c=colors[i], label="RRT Path " + str(i + 1)
+                )
+            plt.imshow(map)
+            plt.gca().invert_yaxis()
+            plt.legend(bbox_to_anchor=(1.5, 1.05))
+            plt.savefig("RRT2.png")
+            plt.close()

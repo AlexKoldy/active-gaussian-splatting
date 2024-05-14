@@ -1,3 +1,7 @@
+"""
+Adapted from 2024 Pratik Chaudhari, UPenn.
+"""
+
 # general
 import argparse
 import pathlib
@@ -30,8 +34,7 @@ import matplotlib.colors
 import torch
 import torch.nn.functional as F
 
-# from lpips import LPIPS
-import cv2
+import pickle
 
 
 from gaussian_splatting.trainer import Trainer
@@ -94,6 +97,20 @@ class GSSTrainer(Trainer):
         # self.USE_PROFILE = False
 
     def on_train_step(self):
+
+        # print(
+        #     "torch.cuda.memory_allocated: %fGB"
+        #     % (torch.cuda.memory_allocated(0) / 1024 / 1024 / 1024)
+        # )
+        # print(
+        #     "torch.cuda.memory_reserved: %fGB"
+        #     % (torch.cuda.memory_reserved(0) / 1024 / 1024 / 1024)
+        # )
+        # print(
+        #     "torch.cuda.max_memory_reserved: %fGB"
+        #     % (torch.cuda.max_memory_reserved(0) / 1024 / 1024 / 1024)
+        # )
+
         ind = np.random.choice(len(self.data["camera"]))
         camera = self.data["camera"][ind]
         rgb = self.data["rgb"][ind]
@@ -127,17 +144,30 @@ class GSSTrainer(Trainer):
             + depth_loss * self.lambda_depth
         )
         # psnr = utils.img2psnr(out['render'], rgb)
-        log_dict = {
-            "total": total_loss,
-            "l1": l1_loss,
-            "ssim": ssim_loss,
-            "depth": depth_loss,
-        }  # , 'psnr': psnr}
+        # log_dict = {
+        #     "total": total_loss,
+        #     "l1": l1_loss,
+        #     "ssim": ssim_loss,
+        #     "depth": depth_loss,
+        # }  # , 'psnr': psnr}
 
         del out, l1_loss, depth_loss, ssim_loss, camera, rgb, depth, mask
         torch.cuda.empty_cache()
 
-        return total_loss, log_dict
+        # print(
+        #     "torch.cuda.memory_allocated: %fGB"
+        #     % (torch.cuda.memory_allocated(0) / 1024 / 1024 / 1024)
+        # )
+        # print(
+        #     "torch.cuda.memory_reserved: %fGB"
+        #     % (torch.cuda.memory_reserved(0) / 1024 / 1024 / 1024)
+        # )
+        # print(
+        #     "torch.cuda.max_memory_reserved: %fGB"
+        #     % (torch.cuda.max_memory_reserved(0) / 1024 / 1024 / 1024)
+        # )
+
+        return total_loss  # , log_dict
 
     def on_evaluate_step(self, **kwargs):
         import matplotlib.pyplot as plt
@@ -159,6 +189,9 @@ class GSSTrainer(Trainer):
         image = np.concatenate([image, depth], axis=0)
         utils.imwrite(str(self.results_folder / f"image-{self.step}.png"), image)
 
+        del rgb, out, rgb_pd, depth_pd, depth, image
+        torch.cuda.empty_cache()
+
 
 class ActiveGaussSplatMapper:
     def __init__(self, args) -> None:
@@ -170,17 +203,8 @@ class ActiveGaussSplatMapper:
 
         self.save_path = self.config_file["save_path"] + "/"
 
-        # self.learning_rate_lst = []
-
-        # scene parameters
-        # self.aabb = torch.tensor(
-        #     self.config_file["aabb"], device=self.config_file["cuda"]
-        # )
-
         self.train_dataset = None
         self.test_dataset = None
-
-        # self.sem_ce_ls = []
 
         self.sim_step = 0
         self.viz_save_path = self.save_path + "/viz/"
@@ -188,35 +212,6 @@ class ActiveGaussSplatMapper:
         self.gaussModel = GaussModel(debug=False)
 
         self.gaussRender = GaussRenderer()
-
-        # # Replace lpips with dssim for similarity metric
-        # self.lpips_net = LPIPS(net="vgg").to(self.config_file["cuda"])
-        # self.lpips_norm_fn = lambda x: x[None, ...].permute(0, 3, 1, 2) * 2 - 1
-
-        # self.focal = (
-        #     0.5 * self.config_file["img_w"] / np.tan(self.config_file["hfov"] / 2)
-        # )
-
-        # # Unsure if this cmap stuff is necessary
-        # cmap = plt.cm.tab20
-        # cmaplist = [cmap(i) for i in range(cmap.N)]
-        # cmap1 = plt.cm.tab20b
-        # cmaplist1 = [cmap1(i) for i in range(cmap1.N)]
-
-        # cmaplist = (
-        #     cmaplist
-        #     + [cmaplist1[0]]
-        #     + [cmaplist1[1]]
-        #     + [cmaplist1[4]]
-        #     + [cmaplist1[5]]
-        #     + [cmaplist1[8]]
-        #     + [cmaplist1[9]]
-        #     + [cmaplist1[12]]
-        #     + [cmaplist1[13]]
-        #     + [cmaplist1[16]]
-        #     + [cmaplist1[17]]
-        # )
-        # self.custom_cmap = matplotlib.colors.ListedColormap(cmaplist)
 
         r = np.arctan(np.linspace(0.5, 319.5, 320) / 320).tolist()
         r.reverse()
@@ -257,7 +252,7 @@ class ActiveGaussSplatMapper:
         sampled_poses_mat = []
         r = R.from_quat(self.global_origin[3:])
         g_pose = self.global_origin.copy()
-        initial_sample = 40
+        initial_sample = 80
         for i in range(initial_sample):
             angles = r.as_euler("zyx", degrees=True)
             angles[1] = (angles[1] + 9 * i) % 360
@@ -278,32 +273,7 @@ class ActiveGaussSplatMapper:
         (
             sampled_images,
             sampled_depth_images,
-            # sampled_sem_images,
         ) = self.sim.sample_images_from_poses(sampled_poses_mat)
-
-        # Updating cost map using observed depth values
-        # We can take this out
-        # for i, d_img in enumerate(sampled_depth_images):
-        #     d_points = d_img[int(d_img.shape[0] / 2)]
-        #     R_m = sampled_poses_mat[i][:3, :3]
-        #     euler = R.from_matrix(R_m).as_euler("yzx")
-        #     d_angles = (self.align_angles + euler[0]) % (2 * np.pi)
-        #     w_loc = sampled_poses_mat[i][:3, 3]
-        #     grid_loc = np.array(
-        #         (w_loc - self.aabb.cpu().numpy()[:3])
-        #         // self.config_file["main_grid_size"],
-        #         dtype=int,
-        #     )
-        #     self.cost_map, visiting_map = update_cost_map(
-        #         cost_map=self.cost_map,
-        #         depth=d_points,
-        #         angle=d_angles,
-        #         g_loc=grid_loc,
-        #         w_loc=w_loc,
-        #         aabb=self.aabb.cpu().numpy(),
-        #         resolution=self.config_file["main_grid_size"],
-        #     )
-        #     self.visiting_map += visiting_map
 
         sampled_images = sampled_images[:, :, :, :3]
 
@@ -312,124 +282,20 @@ class ActiveGaussSplatMapper:
         self.train_dataset = Dataset(
             training=True,
             save_fp=self.save_path + "/train/",
-            # num_rays=self.config_file["init_batch_size"],
-            # num_models=self.config_file["n_ensembles"],
             device=self.config_file["cuda"],
         )
 
         self.train_dataset.update_data(
             sampled_images,
             sampled_depth_images,
-            # sampled_sem_images,
             sampled_poses_mat,
         )
-
-        # test_loc = self.config_file["test_loc"]
-
-        # test_quat = self.config_file["test_quat"]
-
-        # test_samples = []
-
-        # for loc in test_loc:
-        #     for quat in test_quat:
-        #         test_samples.append(np.array(loc + quat))
-
-        # test_sampled_poses_mat = []
-        # for p in test_samples:
-        #     T = np.eye(4)
-        #     T[:3, :3] = R.from_quat(p[3:]).as_matrix()
-        #     T[:3, 3] = p[:3]
-        #     test_sampled_poses_mat.append(T)
-
-        # (
-        #     test_sampled_images,
-        #     test_sampled_depth_images,
-        #     # test_sampled_sem_images,
-        # ) = self.sim.sample_images_from_poses(test_samples)
-
-        # test_sampled_images = test_sampled_images[:, :, :, :3]
-
-        # self.test_dataset = Dataset(
-        #     training=False,
-        #     save_fp=self.save_path + "/test/",
-        #     # num_models=self.config_file["n_ensembles"],
-        #     device=self.config_file["cuda"],
-        # )
-
-        # self.test_dataset.update_data(
-        #     test_sampled_images,
-        #     test_sampled_depth_images,
-        #     # test_sampled_sem_images,
-        #     np.array(test_sampled_poses_mat),
-        # )
 
         print("Initialization Finished")
 
     def gauss_training(self, steps, final_train=False, initial_train=False):
         print("3D Gaussian Model Training Started")
 
-        # if final_train:
-        #     self.schedulers = []
-        #     for i in range(self.config_file["n_ensembles"]):
-        #         optimizer = self.optimizers[i]
-        #         self.schedulers.append(
-        #             torch.optim.lr_scheduler.MultiStepLR(
-        #                 optimizer,
-        #                 milestones=[int(steps * 0.3), int(steps * 0.8)],
-        #                 gamma=0.1,
-        #             )
-        #         )
-
-        # num_test_images = self.test_dataset.size
-        # test_idx = np.arange(num_test_images)
-
-        # self.sem_ce_ls = []
-
-        # def occ_eval_fn(x):
-        #     density = radiance_field.query_density(x)
-        #     return density * self.config_file["render_step_size"]
-
-        # losses = [[], [], []]
-
-        # for step in tqdm.tqdm(range(steps)):
-        # train and record the models in the ensemble
-        # ground_truth_imgs = []
-        # # rendered_imgs = [[] for _ in range(num_test_images)]
-        # rendered_imgs = []
-
-        # psnrs_lst = [[] for _ in range(num_test_images)]
-        # lpips_lst = [[] for _ in range(num_test_images)]
-
-        # ground_truth_depth = []
-        # # depth_imgs = [[] for _ in range(num_test_images)]
-        # depth_imgs = []
-        # # mse_dep_lst = [[] for _ in range(num_test_images)]
-        # mse_dep_list = []
-
-        # ground_truth_sem = []
-        # sem_imgs = []
-
-        # training each model
-        # for model_idx, (
-        #     radiance_field,
-        #     estimator,
-        #     optimizer,
-        #     scheduler,
-        #     grad_scaler,
-        # ) in enumerate(
-        #     zip(
-        #         self.radiance_fields,
-        #         self.estimators,
-        #         self.optimizers,
-        #         self.schedulers,
-        #         self.grad_scalers,
-        #     )
-        # ):
-        # device = (
-        #     self.config_file["cuda"]
-        # if model_idx == 0
-        # else self.config_file["cuda"]
-        # )
         device = "cuda"
         # radiance_field.train()
         # estimator.train()
@@ -467,8 +333,8 @@ class ActiveGaussSplatMapper:
                 results_folder="result",
                 render_kwargs=render_kwargs,
             )
-            del points
-            torch.cuda.empty_cache()
+            # del points
+            # torch.cuda.empty_cache()
         else:
             render_kwargs = {"white_bkgd": True}
             trainer = GSSTrainer(
@@ -485,210 +351,41 @@ class ActiveGaussSplatMapper:
             )
         del trainset, data
         torch.cuda.empty_cache()
-        # trainer.on_evaluate_step()
+        trainer.on_evaluate_step()
         trainer.train()
-
-        # ## Save checkpoit for video
-        # if (step + 1) % 1000 == 0:
-        #     self.render(np.array([self.current_pose]))
-        #     if not os.path.exists(self.save_path + "/checkpoints/"):
-        #         os.makedirs(self.save_path + "/checkpoints/")
-
-        #     current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-
-        #     checkpoint_path = (
-        #         self.save_path
-        #         + "/checkpoints/"
-        #         + "model_"
-        #         + str(current_time)
-        #         + ".pth"
-        #     )
-        #     save_dict = {
-        #         "occ_grid": self.estimators[0].binaries,
-        #         "model": self.radiance_fields[0].state_dict(),
-        #         "optimizer_state_dict": self.optimizers[0].state_dict(),
-        #     }
-        #     torch.save(save_dict, checkpoint_path)
-        #     print("Saved checkpoints at", checkpoint_path)
-
-        # if step == steps + 1 and (
-        #     (planning_step == 0) or ((planning_step + 1) % 2 == 0) or final_train
-        # ):
-        #     print("start evaluation")
-
-        #     print("loss")
-        #     print(np.mean(np.array(losses), axis=1))
-
-        #     eval_path = self.save_path + "/prediction/"
-        #     if not os.path.exists(eval_path):
-        #         os.makedirs(eval_path)
-
-        #     psnr_test = np.array(psnrs_lst)[:, 0]
-        #     depth_mse_test = np.array(mse_dep_lst)[:, 0]
-        #     sem_ce = np.array(self.sem_ce_ls)
-
-        #     print("Mean PSNR: " + str(np.mean(psnr_test)))
-        #     print("Mean Depth MSE: " + str(np.mean(depth_mse_test)))
-        #     print("Mean Semantic CE: " + str(np.mean(sem_ce)))
-        #     self.errors_hist.append(
-        #         [
-        #             planning_step,
-        #             np.mean(psnr_test),
-        #             np.mean(depth_mse_test),
-        #             np.mean(sem_ce),
-        #         ]
-        #     )
-
-    # def render(self, traj):
-    #     traj1 = np.copy(traj)
-    #     traj2 = np.copy(traj)
-    #     step = self.sim_step
-
-    #     render_images = np.array(self.sim.render_tpv(traj))
-    #     if not os.path.exists(self.viz_save_path):
-    #         os.makedirs(self.viz_save_path)
-    #     for img in render_images:
-    #         cv2.imwrite(self.viz_save_path + str(self.sim_step) + ".png", img)
-    #         self.sim_step += 1
-
-    #     render_images = np.array(self.sim.render_top_tpv(traj))
-    #     if not os.path.exists(self.viz_save_path):
-    #         os.makedirs(self.viz_save_path)
-    #     if not os.path.exists(self.viz_save_path + "top/"):
-    #         os.makedirs(self.viz_save_path + "top/")
-    #     for s, img in enumerate(render_images):
-    #         cv2.imwrite(self.viz_save_path + "top/" + str(step + s) + ".png", img)
-
-    #     fpv_path = self.viz_save_path + "fpv/"
-    #     if not os.path.exists(fpv_path):
-    #         os.makedirs(fpv_path)
-    #         os.makedirs(fpv_path + "gt_rgb/")
-    #         os.makedirs(fpv_path + "gt_dep/")
-    #         os.makedirs(fpv_path + "gt_sem/")
-    #         os.makedirs(fpv_path + "pd_rgb/")
-    #         os.makedirs(fpv_path + "pd_dep/")
-    #         os.makedirs(fpv_path + "pd_occ/")
-    #         os.makedirs(fpv_path + "pd_sem/")
-
-    #     (
-    #         sampled_images,
-    #         sampled_depth_images,
-    #         sampled_sem_images,
-    #     ) = self.sim.sample_images_from_poses(traj1)
-
-    #     (
-    #         rgb_predictions,
-    #         depth_predictions,
-    #         acc_predictions,
-    #         sem_predictions,
-    #     ) = Dataset.render_images_from_poses(
-    #         self.radiance_fields[0],
-    #         self.estimators[0],
-    #         traj2,
-    #         self.config_file["img_w"],
-    #         self.config_file["img_h"],
-    #         self.focal,
-    #         self.config_file["near_plane"],
-    #         self.config_file["render_step_size"],
-    #         1,
-    #         self.config_file["cone_angle"],
-    #         self.config_file["alpha_thre"],
-    #         1,
-    #         self.config_file["cuda"],
-    #     )
-
-    #     for st, (rgb, dep, sem, rgb_pd, dep_pd, acc_pd, sem_pd) in enumerate(
-    #         zip(
-    #             sampled_images,
-    #             sampled_depth_images,
-    #             sampled_sem_images,
-    #             rgb_predictions,
-    #             depth_predictions,
-    #             acc_predictions,
-    #             sem_predictions,
-    #         )
-    #     ):
-    #         current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    #         cv2.imwrite(
-    #             fpv_path + "gt_rgb/" + str(step + st) + ".png",
-    #             cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
-    #         )
-    #         cv2.imwrite(
-    #             fpv_path + "pd_rgb/" + str(step + st) + ".png",
-    #             cv2.cvtColor(np.float32(rgb_pd * 255), cv2.COLOR_RGB2BGR),
-    #         )
-
-    #         cv2.imwrite(
-    #             fpv_path + "gt_dep/" + str(step + st) + ".png",
-    #             np.clip(dep * 25, 0, 255),
-    #         )
-    #         cv2.imwrite(
-    #             fpv_path + "pd_dep/" + str(step + st) + ".png",
-    #             np.clip(dep_pd * 25, 0, 255),
-    #         )
-
-    #         sem = d3_40_colors_rgb[sem.flatten()].reshape(sem.shape[0], sem.shape[1], 3)
-    #         cv2.imwrite(
-    #             fpv_path + "gt_sem/" + str(step + st) + ".png",
-    #             cv2.cvtColor(np.float32(sem), cv2.COLOR_RGB2BGR),
-    #         )
-    #         sem_argmax = np.argmax(sem_pd, axis=2)
-    #         sem_pd = d3_40_colors_rgb[sem_argmax.flatten()].reshape(
-    #             sem_argmax.shape[0], sem_argmax.shape[1], 3
-    #         )
-    #         cv2.imwrite(
-    #             fpv_path + "pd_sem/" + str(step + st) + ".png",
-    #             cv2.cvtColor(np.float32(sem_pd), cv2.COLOR_RGB2BGR),
-    #         )
-
-    #         cv2.imwrite(
-    #             fpv_path + "pd_occ/" + str(step + st) + ".png",
-    #             np.clip(acc_pd * 255, 0, 255),
-    #         )
 
     def hessian_approx(self, camera):
         out = self.gaussRender(pc=self.gaussModel, camera=camera)
         rendered_image = out["render"]
-        # plt.figure()
-        # plt.imshow(rendered_image.detach().cpu().numpy())
-        # plt.imshow(np.ones((256, 256)))/
-        # plt.scatter(0, 0)
-        # plt.savefig("testing_image")
+        not_splatted = out["not_splatted"]
+        if not_splatted:
+            return None, not_splatted
         ones = torch.ones_like(rendered_image)
         rendered_image.backward(gradient=ones)
-        # print(self.model_params[0].data)
-        # print(self.model_params[0].grad)
         current_hessian = torch.cat([p.grad.reshape(-1) for p in self.model_params])
 
-        current_hessian = current_hessian * current_hessian + self.reg_lam
+        current_hessian = (
+            torch.nan_to_num(current_hessian * current_hessian) + self.reg_lam
+        )
         del out, rendered_image, ones
         torch.cuda.empty_cache()
 
-        return current_hessian
+        for param in self.model_params:
+            if param.grad is not None:
+                param.grad.zero_()
+
+        return current_hessian, not_splatted
 
     def info_gain(self, traj):
 
         gain = 0
         H_sum = torch.zeros_like(self.running_hessian).cpu()
+        # print(gain)
         for pose in traj:
 
             T = np.eye(4)
             T[:3, :3] = R.from_euler("zyx", pose[3:]).as_matrix()
             T[:3, 3] = pose[:3]
-            # sample_dataset = Dataset(
-            #     training=True,
-            #     save_fp=self.save_path + "/train/",
-            #     device=self.config_file["cuda"],
-            # )
-
-            # sample_dataset.update_data(
-            #     None,
-            #     None,
-            #     np.array(traj),
-            # )
-            # info_gain_val, H_sum = self.info_gain(
-            #     sample_dataset.camtoworlds
-            # )
             T = torch.from_numpy(T).to(torch.float32).to(self.train_dataset.device)
             # print(T)
             cam = get_camera(T.cpu(), self.train_dataset.K.cpu()).to(
@@ -696,16 +393,20 @@ class ActiveGaussSplatMapper:
             )
             # ERROR HERE
             cam = to_viewpoint_camera(cam)
-            H = self.hessian_approx(cam)
+            H, not_splatted = self.hessian_approx(cam)
+            if not_splatted:
+                return 0, None, not_splatted
+            # print("nan in H: ", torch.isnan(H).any())
             pose_gain = torch.sum(H * torch.reciprocal(self.running_hessian))
             H_sum += H.cpu()
             gain += pose_gain
             del H, pose_gain, T, cam
             torch.cuda.empty_cache()
         average_gain = gain / len(traj)
+        # print(average_gain)
         del gain
         torch.cuda.empty_cache()
-        return average_gain, H_sum
+        return average_gain, H_sum, False
 
     def vis_traj(self, trajs, inds, num=0):
         points = np.array(self.quad_traj)[:, :3]
@@ -746,6 +447,12 @@ class ActiveGaussSplatMapper:
         plt.savefig(self.save_path + "/traj" + str(num) + ".png")
         plt.close()
 
+        data = [trajs[ind] for ind in inds]
+        data.append(points)
+
+        with open(self.save_path + "/mat" + str(num) + ".pkl", "wb") as outfile:
+            pickle.dump(data, outfile, pickle.HIGHEST_PROTOCOL)
+
     def planning(self, training_steps_per_step):
         print("Planning Thread Started")
         last_point = self.train_dataset.camtoworlds[-1].cpu().numpy()
@@ -763,14 +470,15 @@ class ActiveGaussSplatMapper:
             first_camtoworld.cpu(), self.train_dataset.K.cpu()
         ).to(self.train_dataset.device)
         first_camera = to_viewpoint_camera(first_camera)
-        self.running_hessian = self.hessian_approx(first_camera)
+        self.running_hessian, _ = self.hessian_approx(first_camera)
 
         for camtoworld in self.train_dataset.camtoworlds[1:]:
             camera = get_camera(camtoworld.cpu(), self.train_dataset.K.cpu()).to(
                 self.train_dataset.device
             )
             camera = to_viewpoint_camera(camera)
-            self.running_hessian += self.hessian_approx(camera)
+            hess, _ = self.hessian_approx(camera)
+            self.running_hessian += hess
 
         self.quad_traj.append(self.current_pose)
 
@@ -791,7 +499,7 @@ class ActiveGaussSplatMapper:
             # aabb[5] = self.aabb[4]
 
             # Sample end points using current model's Gaussian locations
-            num_samples = 5
+            num_samples = 10
             xyzs = self.gaussModel.get_xyz  # Nx3
             sample_end_points = xyzs[
                 np.random.choice(len(xyzs), num_samples, replace=False)
@@ -806,24 +514,29 @@ class ActiveGaussSplatMapper:
 
             # RRT will return one trajectory (list of points R3) for a start and end position
             # Here we will loop over ths function for all sampled points, and interpolate yaw angle orientation
-            full_trajs = []
-            for i in range(num_samples):
-                rrt = RapidlyExploringRandomTreePlanner(
-                    self.gaussModel,
-                    move_distance=0.5,  # how far to move in direction of sampled point
-                    k=2,  # number of Gaussians
-                    z=0.0,  # height of planning [m]
-                    num_points_to_check=10,  # number of points to check for collision
-                    cost_collision_thresh=10.0,  # cost threshold on whether or not there is a collision based off total sampled cost across the lin
-                    max_samples=1000,  # maximum number of times to try sampling a new node
-                    goal_tresh=0.25,  # distance from node to goal point to be considered converged
-                    bounds=bounds,
-                )
+            rrt = RapidlyExploringRandomTreePlanner(
+                self.gaussModel,
+                move_distance=0.5,  # how far to move in direction of sampled point
+                k=2,  # number of Gaussians
+                z=0.0,  # height of planning [m]
+                num_points_to_check=10,  # number of points to check for collision
+                cost_collision_thresh=10.0,  # cost threshold on whether or not there is a collision based off total sampled cost across the lin
+                max_samples=1000,  # maximum number of times to try sampling a new node
+                goal_tresh=0.25,  # distance from node to goal point to be considered converged
+                bounds=bounds,
+            )
 
+            full_trajs = []
+            gains = []
+            H_sums = []
+            i = 0
+            while i < num_samples:
                 goal_point = sample_end_points[i][::2].clone().detach().cpu().numpy()
                 traj_xyz = rrt.plan(self.current_pose, goal_point)  # output of RRT
                 # Number of rows in the original array
                 num_points_in_traj = traj_xyz.shape[0]
+                if num_points_in_traj > 25:
+                    continue
                 zero_cols = np.zeros((num_points_in_traj, 3))
                 traj_full = np.hstack((traj_xyz, zero_cols))
                 current_yaw = self.current_pose[4]
@@ -833,42 +546,28 @@ class ActiveGaussSplatMapper:
                 traj_yaws = np.linspace(current_yaw, goal_yaw, num=num_points_in_traj)
                 for j in range(num_points_in_traj):
                     traj_full[j][4] = traj_yaws[j] % (2 * np.pi)
+                print(traj_full.shape)
+                info_gain_val, H_sum, no_splat = self.info_gain(
+                    traj_full
+                )  # TODO information gain function(traj) goes here, use mean info gainyaw
+                if no_splat:
+                    continue
+                i += 1
+                H_sums.append(H_sum)
+                gains.append(info_gain_val.cpu())
                 full_trajs.append(traj_full)
 
             copy_traj = full_trajs.copy()
 
-            gains = []
-            H_sums = []
-            for traj in copy_traj:
-                print(traj.shape)
-                info_gain_val, H_sum = self.info_gain(
-                    traj
-                )  # TODO information gain function(traj) goes here, use mean info gainyaw
-                H_sums.append(H_sum)
-                gains.append(info_gain_val.cpu())
-
-                # del info_gain_val, traj
-                # torch.cuda.empty_cache()
-
-                # print(
-                #     "torch.cuda.memory_allocated: %fGB"
-                #     % (torch.cuda.memory_allocated(0) / 1024 / 1024 / 1024)
-                # )
-                # print(
-                #     "torch.cuda.memory_reserved: %fGB"
-                #     % (torch.cuda.memory_reserved(0) / 1024 / 1024 / 1024)
-                # )
-                # print(
-                #     "torch.cuda.max_memory_reserved: %fGB"
-                #     % (torch.cuda.max_memory_reserved(0) / 1024 / 1024 / 1024)
-                # )
+            # del info_gain_val, traj
+            # torch.cuda.empty_cache()
 
             best_index = np.argmax(np.array(gains))
             print(copy_traj[best_index].shape)
             # if step == 5:
             best_sort_inds = (np.argsort(np.array(gains))[::-1])[:5]
             print(best_sort_inds)
-            print(gains)
+            # print(gains)
             self.vis_traj(copy_traj, best_sort_inds, num=step)
 
             self.running_hessian += H_sums[best_index].to(self.device)
@@ -887,12 +586,12 @@ class ActiveGaussSplatMapper:
                 T[:3, 3] = pose[:3]
                 sampled_poses_mat.append(T)
 
-            self.train_dataset.update_data(
+            self.train_dataset.resample_data(
                 sampled_images, sampled_depths, sampled_poses_mat
             )
 
-            del sampled_images, sampled_depths, sampled_poses_mat
-            torch.cuda.empty_cache()
+            # del sampled_images, sampled_depths, sampled_poses_mat
+            # torch.cuda.empty_cache()
 
             print("plan finished at: " + str(self.current_pose))
 
@@ -929,10 +628,8 @@ class ActiveGaussSplatMapper:
         self.initialization()
 
         # Train initial model with this data
-        self.gauss_training(
-            int(self.config_file["training_steps"] / 50), initial_train=True
-        )
-        # self.gaussModel.create_from_pcd(pcd=raw_points)
+        self.gauss_training(int(self.config_file["training_steps"]), initial_train=True)
+        # self.gaussModel.create_from_pcd(pcd=raw_points)samples
 
         self.model_params = (
             self.gaussModel._xyz,
@@ -949,9 +646,9 @@ class ActiveGaussSplatMapper:
 
             self.planning(int(self.config_file["training_steps"]))
 
-            self.gauss_training(
-                self.config_file["training_steps"] * 5, final_train=True
-            )
+            # self.gauss_training(
+            #     self.config_file["training_steps"] * 5, final_train=True
+            # )
 
             # plt.plot(np.arange(len(self.learning_rate_lst)), self.learning_rate_lst)
             # plt.savefig(self.save_path + "/learning_rate.png")

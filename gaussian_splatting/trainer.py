@@ -159,7 +159,7 @@ class Trainer(object):
                 for _ in range(self.gradient_accumulate_every):
 
                     with self.accelerator.autocast():
-                        loss, log_dict = self.on_train_step()
+                        loss = self.on_train_step()
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss
 
@@ -170,8 +170,8 @@ class Trainer(object):
                 total_loss = total_loss.item()
                 log_str = f"loss: {total_loss:.3f}"
 
-                for k in log_dict.keys():
-                    log_str += " {}: {:.3f}".format(k, log_dict[k])
+                # for k in log_dict.keys():
+                #     log_str += " {}: {:.3f}".format(k, log_dict[k])
 
                 pbar.set_description(log_str)
 
@@ -189,6 +189,9 @@ class Trainer(object):
                         self.save(milestone)
 
                 pbar.update(1)
+
+                del total_loss, loss
+                torch.cuda.empty_cache()
 
         if self.with_tracking:
             accelerator.end_training()
