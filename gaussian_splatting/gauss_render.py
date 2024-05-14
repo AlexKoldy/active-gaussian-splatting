@@ -193,6 +193,7 @@ class GaussRenderer(nn.Module):
         self.render_alpha = torch.zeros(*self.pix_coord.shape[:2], 1).to("cuda")
 
         TILE_SIZE = 64
+        not_splatted = True
         for h in range(0, camera.image_height, TILE_SIZE):
             for w in range(0, camera.image_width, TILE_SIZE):
                 # check if the rectangle penetrate the tile
@@ -206,6 +207,8 @@ class GaussRenderer(nn.Module):
 
                 if not in_mask.sum() > 0:
                     continue
+                else:
+                    not_splatted = False
 
                 P = in_mask.sum()
                 tile_coord = self.pix_coord[
@@ -257,6 +260,7 @@ class GaussRenderer(nn.Module):
             "alpha": self.render_alpha,
             "visiility_filter": radii > 0,
             "radii": radii,
+            "not_splatted": not_splatted,
         }
 
     def forward(self, camera, pc, **kwargs):

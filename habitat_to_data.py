@@ -1,5 +1,5 @@
 """
-Adapted from 2022 Ruilong Li, UC Berkeley.
+Adapted from 2024 Pratik Chaudhari, UPenn.
 """
 
 import os
@@ -70,26 +70,28 @@ class Dataset(torch.utils.data.Dataset):
         if not os.path.exists(self.save_fp):
             os.makedirs(self.save_fp)
 
-    # def resample_data(self):
-    #     indices = np.random.choice(
-    #         len(self.images), size=(int(len(self.images) * 0.7),), replace=False
-    #     )
-    #     self.images = self.images[indices]
-    #     self.depths = self.depths[indices]
-    #     self.semantics = self.semantics[indices]
-    #     self.camtoworlds = self.camtoworlds[indices]
+    def resample_data(self, images, depths, camtoworlds):
+        # pruning_pct = len(images)/len(self.images)
+        indices = np.random.choice(
+            len(self.images), size=len(self.images) - len(images), replace=False
+        )
+        self.images = self.images[indices]
+        self.depths = self.depths[indices]
+        # self.semantics = self.semantics[indices]
+        self.camtoworlds = self.camtoworlds[indices]
 
-    #     # bootstrap indices
-    #     self.bootstrap_indices = [
-    #         np.array([]).astype(int) for _ in range(self.num_models - 1)
-    #     ]
-    #     for i, arr in enumerate(self.bootstrap_indices):
-    #         ids = np.random.choice(
-    #             len(self.images),
-    #             size=(int(len(self.images) * self.boot_scale),),
-    #             replace=True,
-    #         )
-    #         self.bootstrap_indices[i] = np.concatenate([arr, ids], axis=0)
+        self.update_data(images, depths, camtoworlds)
+        # # bootstrap indices
+        # self.bootstrap_indices = [
+        #     np.array([]).astype(int) for _ in range(self.num_models - 1)
+        # ]
+        # for i, arr in enumerate(self.bootstrap_indices):
+        #     ids = np.random.choice(
+        #         len(self.images),
+        #         size=(int(len(self.images) * self.boot_scale),),
+        #         replace=True,
+        #     )
+        #     self.bootstrap_indices[i] = np.concatenate([arr, ids], axis=0)
 
     def update_data(self, images, depths, camtoworlds):
         if self.images is None:
